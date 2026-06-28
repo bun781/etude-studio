@@ -1,0 +1,28 @@
+{
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devPath": "http://localhost:5173",
+    "distDir": "../dist"
+  },
+  "package": {
+    "productName": "Reference Practice",
+    "version": "0.1.0"
+  },
+  "tauri": {
+    "windows": [
+      {
+        "title": "Reference Practice",
+        "width": 1600,
+        "height": 980,
+        "resizable": true
+      }
+    ],
+    "bundle": {
+      "active": true,
+      "identifier": "com.bun781.reference-practice",
+      "targets": ["all"]
+    }
+  }
+}
+
