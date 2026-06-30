@@ -63,9 +63,11 @@ const DEFAULT_PREFERENCES: StoredPreferences = {
 
 function App() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const autoplayOnLoadRef = useRef(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
+  const recordingStartedAtMsRef = useRef<number | null>(null);
   const activeSegmentIdRef = useRef<string | null>(null);
   const noteSaveTimerRef = useRef<number | null>(null);
   const lastSavedNoteRef = useRef<{ projectId: string | null; text: string }>({
@@ -206,6 +208,10 @@ function App() {
 
     const handleLoadedMetadata = () => {
       setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
+      if (autoplayOnLoadRef.current) {
+        autoplayOnLoadRef.current = false;
+        void audio.play();
+      }
     };
     const handlePlay = () => setIsPlaying(true);
     const handlePause = () => setIsPlaying(false);
@@ -222,9 +228,11 @@ function App() {
       }
 
       const active = segments.find((segment) => segment.id === activeSegmentIdRef.current);
-      if (isLooping && active?.referenceStartMs != null && active.referenceEndMs != null) {
-        if (audio.currentTime * 1000 >= active.referenceEndMs - 30) {
-          audio.currentTime = active.referenceStartMs / 1000;
+      if (compareMode === "reference" && isLooping && active?.referenceStartMs != null && active.referenceEndMs != null) {
+        const startMs = Math.min(active.referenceStartMs, active.referenceEndMs);
+        const endMs = Math.max(active.referenceStartMs, active.referenceEndMs);
+        if (audio.currentTime * 1000 >= endMs - 30) {
+          audio.currentTime = startMs / 1000;
           void audio.play();
         }
       }
@@ -296,6 +304,30 @@ function App() {
       setCompareMode("recording");
     }
   }, [project, compareMode]);
+
+  useEffect(() => {
+    if (!project || activeView !== "practice" || compareMode !== "recording" || !activeSegmentId) {
+      return;
+    }
+    const activeRecording = resolveRecording(project);
+    if (activeRecording?.segmentId === activeSegmentId) {
+      return;
+    }
+    const segmentRecording = project.recordings.find((recording) => recording.segmentId === activeSegmentId);
+    if (!segmentRecording || segmentRecording.id === project.project.activeRecordingId) {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const detail = await setActiveRecording(project.project.id, segmentRecording.id);
+      if (!cancelled) {
+        setProject(detail);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSegmentId, activeView, compareMode, project]);
 
   useEffect(() => {
     if (!isTutorialOpen) {
@@ -413,9 +445,14 @@ function App() {
       if (!sourcePath) {
         return;
       }
-      const detail = await importReference({ projectId: project.project.id, sourcePath });
+      const importedDetail = await importReference({ projectId: project.project.id, sourcePath });
+      const importedReference = importedDetail.references[0] ?? null;
+      const detail = importedReference
+        ? await setActiveReference(importedDetail.project.id, importedReference.id)
+        : importedDetail;
       setProject(detail);
-      await refreshProjects(project.project.id);
+      setCompareMode("reference");
+      await refreshProjects(detail.project.id);
       setStatusMessage("Reference imported.");
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Reference import could not finish.");
@@ -448,6 +485,17 @@ function App() {
     setProject(detail);
     setCompareMode("recording");
     setStatusMessage("Active recording updated.");
+  }
+
+  async function handlePlaySegmentRecording(recordingId: string) {
+    if (!project) {
+      return;
+    }
+    autoplayOnLoadRef.current = true;
+    const detail = await setActiveRecording(project.project.id, recordingId);
+    setProject(detail);
+    setCompareMode("recording");
+    setStatusMessage("Playing recording.");
   }
 
   async function handleSaveRecording(
@@ -583,14 +631,14 @@ function App() {
 
   function handleSelectSegment(segmentId: string) {
     setActiveSegmentId(segmentId);
-    setIsLooping(false);
     const segments = sortSegments(project?.score?.segments ?? []);
     const segment = segments.find((item) => item.id === segmentId);
     const audio = audioRef.current;
     if (segment?.referenceStartMs != null && audio && compareMode === "reference") {
-      audio.currentTime = segment.referenceStartMs / 1000;
+      const startMs =
+        segment.referenceEndMs == null ? segment.referenceStartMs : Math.min(segment.referenceStartMs, segment.referenceEndMs);
+      audio.currentTime = startMs / 1000;
       setCurrentTime(audio.currentTime);
-      void audio.play();
     }
   }
 
@@ -610,17 +658,39 @@ function App() {
     }
   }
 
-  function handleMarkSegmentBoundary(edge: "start" | "end") {
-    const audio = audioRef.current;
-    if (!audio || !activeSegmentId) {
+  function handleSetSegmentBoundary(edge: "start" | "end", time: number) {
+    if (!project || !activeSegmentId) {
       return;
     }
-    const timestampMs = Math.round(audio.currentTime * 1000);
-    void handleUpdateSegment(
-      activeSegmentId,
-      edge === "start" ? { referenceStartMs: timestampMs } : { referenceEndMs: timestampMs },
-    );
-    setStatusMessage(edge === "start" ? "Segment start marked." : "Segment end marked.");
+    if (compareMode !== "reference") {
+      setStatusMessage("Switch to the reference before aligning passage timing.");
+      return;
+    }
+    const reference = resolveReference(project);
+    if (!reference) {
+      setStatusMessage("Import a reference recording before aligning passage timing.");
+      return;
+    }
+    const segments = sortSegments(project.score?.segments ?? []);
+    const segment = segments.find((item) => item.id === activeSegmentId);
+    if (!segment) {
+      return;
+    }
+    const patch = buildSegmentBoundaryPatch(segment, edge, Math.round(time * 1000), reference.id, duration);
+    void handleUpdateSegment(activeSegmentId, patch);
+    setStatusMessage(edge === "start" ? "Passage start aligned." : "Passage end aligned.");
+  }
+
+  function handleToggleLoop() {
+    if (compareMode !== "reference") {
+      setStatusMessage("Looping uses the reference passage timing.");
+      return;
+    }
+    if (activeSegment?.referenceStartMs == null || activeSegment.referenceEndMs == null) {
+      setStatusMessage("Set a reference start and end for this passage first.");
+      return;
+    }
+    setIsLooping((value) => !value);
   }
 
   async function handlePlayPause() {
@@ -631,10 +701,15 @@ function App() {
     }
     try {
       if (audio.paused) {
-        if (activeView === "practice" && activeSegment?.referenceStartMs != null && activeSegment.referenceEndMs != null) {
+        if (
+          compareMode === "reference" &&
+          (activeView === "practice" || isLooping) &&
+          activeSegment?.referenceStartMs != null &&
+          activeSegment.referenceEndMs != null
+        ) {
           setIsLooping(true);
-          const startSeconds = activeSegment.referenceStartMs / 1000;
-          const endSeconds = activeSegment.referenceEndMs / 1000;
+          const startSeconds = Math.min(activeSegment.referenceStartMs, activeSegment.referenceEndMs) / 1000;
+          const endSeconds = Math.max(activeSegment.referenceStartMs, activeSegment.referenceEndMs) / 1000;
           if (audio.currentTime < startSeconds || audio.currentTime >= endSeconds) {
             audio.currentTime = startSeconds;
             setCurrentTime(startSeconds);
@@ -655,8 +730,12 @@ function App() {
       return;
     }
     audio.pause();
-    audio.currentTime = 0;
-    setCurrentTime(0);
+    const resetTime =
+      compareMode === "reference" && activeSegment?.referenceStartMs != null
+        ? Math.min(activeSegment.referenceStartMs, activeSegment.referenceEndMs ?? activeSegment.referenceStartMs) / 1000
+        : 0;
+    audio.currentTime = resetTime;
+    setCurrentTime(resetTime);
     setIsPlaying(false);
   }
 
@@ -689,6 +768,7 @@ function App() {
       chunksRef.current = [];
       const segmentId = activeSegmentIdRef.current;
       const startedAt = currentIsoTimestamp();
+      recordingStartedAtMsRef.current = Date.now();
       const audio = audioRef.current;
       if (audio && !audio.paused) {
         audio.pause();
@@ -712,19 +792,24 @@ function App() {
         streamRef.current = null;
         recorderRef.current = null;
         setIsRecording(false);
+        const durationMs = recordingStartedAtMsRef.current == null ? null : Date.now() - recordingStartedAtMsRef.current;
+        recordingStartedAtMsRef.current = null;
         const detail = await registerRecording({
           projectId: project.project.id,
           fileName,
           relativePath,
           name: `Take ${project.recordings.length + 1}`,
-          referenceId: project.project.activeReferenceId,
+          referenceId: resolveReference(project)?.id ?? null,
           segmentId,
           recordedAt: startedAt,
-          durationMs: null,
+          durationMs,
         });
         setProject(detail);
-        if (detail.recordings.length > 0) {
-          const activeDetail = await setActiveRecording(detail.project.id, detail.recordings[0].id);
+        const savedRecording =
+          detail.recordings.find((recording) => recording.recordedAt === startedAt && recording.fileName === fileName) ??
+          detail.recordings[0];
+        if (savedRecording) {
+          const activeDetail = await setActiveRecording(detail.project.id, savedRecording.id);
           setProject(activeDetail);
         }
         setStatusMessage("Recording saved.");
@@ -734,6 +819,7 @@ function App() {
       setIsRecording(true);
       setStatusMessage("Recording in progress.");
     } catch (error) {
+      recordingStartedAtMsRef.current = null;
       setStatusMessage(error instanceof Error ? error.message : "Recording could not start.");
     }
   }
@@ -748,6 +834,10 @@ function App() {
 
   const segments = sortSegments(project?.score?.segments ?? []);
   const activeSegment = segments.find((segment) => segment.id === activeSegmentId) ?? null;
+  const activeSegmentIndex = activeSegment ? segments.findIndex((segment) => segment.id === activeSegment.id) : -1;
+  const activeSegmentRecordings = activeSegment
+    ? project?.recordings.filter((recording) => recording.segmentId === activeSegment.id) ?? []
+    : [];
   const pdfSrc =
     project?.score != null ? toFileSrc(`${project.project.rootPath}/${project.score.relativePath}`) : null;
 
@@ -759,7 +849,9 @@ function App() {
       currentTime={currentTime}
       zoom={timelineZoom}
       segments={segments}
+      activeSegment={activeSegment}
       activeSegmentId={activeSegmentId}
+      activeSegmentRecordingCount={activeSegmentRecordings.length}
       isLooping={isLooping}
       activeSourceLabel={resolveSourceLabel(project, compareMode)}
       compareMode={compareMode}
@@ -780,9 +872,8 @@ function App() {
       onZoomChange={setTimelineZoom}
       onCompareModeChange={setCompareMode}
       onSelectSegment={handleSelectSegment}
-      onToggleLoop={() => setIsLooping((value) => !value)}
-      onMarkSegmentStart={() => handleMarkSegmentBoundary("start")}
-      onMarkSegmentEnd={() => handleMarkSegmentBoundary("end")}
+      onToggleLoop={handleToggleLoop}
+      onSetSegmentBoundary={handleSetSegmentBoundary}
     />
   ) : null;
 
@@ -875,6 +966,7 @@ function App() {
                 references={project.references}
                 onImportScore={() => void handleImportScore()}
                 onImportReference={() => void handleImportReference()}
+                onOpenPractice={() => setActiveView("practice")}
                 noteText={noteText}
                 onNoteChange={setNoteText}
                 transport={transport}
@@ -892,16 +984,16 @@ function App() {
                 pdfSrc={pdfSrc}
                 segments={segments}
                 activeSegment={activeSegment}
-                segmentRecordings={
-                  activeSegment
-                    ? project.recordings.filter((recording) => recording.segmentId === activeSegment.id)
-                    : []
-                }
+                activeSegmentIndex={activeSegmentIndex}
+                segmentRecordings={activeSegmentRecordings}
+                activeRecordingId={project.project.activeRecordingId}
                 onPrev={handlePrevSegment}
                 onNext={handleNextSegment}
                 onOpenSetup={() => setActiveView("setup")}
+                onUpdateSegment={(segmentId, patch) => void handleUpdateSegment(segmentId, patch)}
                 isRecording={isRecording}
                 onToggleRecording={() => void handleToggleRecording()}
+                onPlayRecording={(recordingId) => void handlePlaySegmentRecording(recordingId)}
                 onDeleteRecording={(recordingId) => void handleDeleteRecording(recordingId)}
                 transport={transport}
               />
@@ -992,8 +1084,8 @@ const TUTORIAL_STEPS: TutorialStep[] = [
   },
   {
     id: "setup-screen",
-    title: "Click the score to create a segment",
-    body: "Click once to mark where a passage starts, click again to mark where it ends, then name it. No percentages, no dividers.",
+    title: "Highlight the passage on the score",
+    body: "Click one corner of the passage, click the opposite corner, then name it. The highlight is what Practice renders back to you.",
     targetId: "setup-screen",
     view: "setup",
   },
@@ -1082,13 +1174,61 @@ function sortSegments(segments: PracticeSegment[]): PracticeSegment[] {
 function findSegmentForTimeMs(segments: PracticeSegment[], timeMs: number): PracticeSegment | null {
   return (
     segments.find(
-      (segment) =>
-        segment.referenceStartMs != null &&
-        segment.referenceEndMs != null &&
-        timeMs >= segment.referenceStartMs &&
-        timeMs <= segment.referenceEndMs,
+      (segment) => {
+        if (segment.referenceStartMs == null || segment.referenceEndMs == null) {
+          return false;
+        }
+        const start = Math.min(segment.referenceStartMs, segment.referenceEndMs);
+        const end = Math.max(segment.referenceStartMs, segment.referenceEndMs);
+        return timeMs >= start && timeMs <= end;
+      },
     ) ?? null
   );
+}
+
+function buildSegmentBoundaryPatch(
+  segment: PracticeSegment,
+  edge: "start" | "end",
+  timestampMs: number,
+  referenceId: string,
+  durationSeconds: number,
+): SegmentPatch {
+  const maxMs =
+    durationSeconds > 0
+      ? Math.round(durationSeconds * 1000)
+      : Math.max(timestampMs, segment.referenceStartMs ?? timestampMs, segment.referenceEndMs ?? timestampMs);
+  const minGapMs = 250;
+  const clampedTimestamp = clampNumber(timestampMs, 0, maxMs);
+  let startMs = segment.referenceStartMs;
+  let endMs = segment.referenceEndMs;
+
+  if (edge === "start") {
+    startMs = clampedTimestamp;
+  } else {
+    endMs = clampedTimestamp;
+  }
+
+  if (startMs != null && endMs != null) {
+    if (startMs > endMs) {
+      [startMs, endMs] = [endMs, startMs];
+    }
+    if (endMs - startMs < minGapMs) {
+      if (edge === "start") {
+        startMs = Math.max(0, endMs - minGapMs);
+      } else {
+        endMs = Math.min(maxMs, startMs + minGapMs);
+      }
+      if (endMs - startMs < minGapMs) {
+        startMs = Math.max(0, endMs - minGapMs);
+      }
+    }
+  }
+
+  return {
+    referenceId,
+    referenceStartMs: startMs,
+    referenceEndMs: endMs,
+  };
 }
 
 function resolveReference(project: ProjectDetail): ReferenceAsset | null {
@@ -1154,6 +1294,10 @@ function readStoredPreferences(): StoredPreferences {
   } catch {
     return DEFAULT_PREFERENCES;
   }
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 export default App;

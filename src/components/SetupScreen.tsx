@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { PdfPageCanvas, PdfPageGrid, usePdfDocument, type NormalizedPoint } from "./PdfPageViewer";
+import { ScoreAnnotation, getDraftAnnotationRect, getSegmentAnnotationRect } from "./ScoreAnnotation";
 import type { PracticeSegment, ProjectSummary, ReferenceAsset } from "../lib/types";
 
 export type SegmentCreateDraft = {
@@ -41,6 +42,7 @@ type Props = {
   references: ReferenceAsset[];
   onImportScore: () => void;
   onImportReference: () => void;
+  onOpenPractice: () => void;
   noteText: string;
   onNoteChange: (text: string) => void;
   transport: ReactNode;
@@ -64,6 +66,7 @@ export function SetupScreen({
   references,
   onImportScore,
   onImportReference,
+  onOpenPractice,
   noteText,
   onNoteChange,
   transport,
@@ -74,14 +77,16 @@ export function SetupScreen({
   const [showGrid, setShowGrid] = useState(false);
   const [draftStart, setDraftStart] = useState<{ page: number; point: NormalizedPoint } | null>(null);
   const [draftEnd, setDraftEnd] = useState<{ page: number; point: NormalizedPoint } | null>(null);
+  const [draftPreview, setDraftPreview] = useState<{ page: number; point: NormalizedPoint } | null>(null);
   const [draftName, setDraftName] = useState("");
-  const [editingBoundarySegmentId, setEditingBoundarySegmentId] = useState<string | null>(null);
+  const [editingAnnotationSegmentId, setEditingAnnotationSegmentId] = useState<string | null>(null);
 
   useEffect(() => {
     setPage(1);
     setDraftStart(null);
     setDraftEnd(null);
-    setEditingBoundarySegmentId(null);
+    setDraftPreview(null);
+    setEditingAnnotationSegmentId(null);
   }, [pdfSrc]);
 
   const segmentsOnPage = useMemo(
@@ -98,10 +103,12 @@ export function SetupScreen({
   function handleMark(point: NormalizedPoint) {
     if (!draftStart) {
       setDraftStart({ page, point });
+      setDraftPreview({ page, point });
       return;
     }
     setDraftEnd({ page, point });
-    if (!editingBoundarySegmentId) {
+    setDraftPreview(null);
+    if (!editingAnnotationSegmentId) {
       setDraftName(`Segment ${segments.length + 1}`);
     }
   }
@@ -109,14 +116,16 @@ export function SetupScreen({
   function cancelDraft() {
     setDraftStart(null);
     setDraftEnd(null);
+    setDraftPreview(null);
     setDraftName("");
-    setEditingBoundarySegmentId(null);
+    setEditingAnnotationSegmentId(null);
   }
 
-  function startEditingBoundary(segment: PracticeSegment) {
-    setEditingBoundarySegmentId(segment.id);
+  function startEditingAnnotation(segment: PracticeSegment) {
+    setEditingAnnotationSegmentId(segment.id);
     setDraftStart(null);
     setDraftEnd(null);
+    setDraftPreview(null);
     setDraftName(segment.name);
     setPage(segment.startPage);
     setShowGrid(false);
@@ -131,8 +140,8 @@ export function SetupScreen({
     const endPage = swap ? draftStart.page : draftEnd.page;
     const startCoordinate = swap ? draftEnd.point : draftStart.point;
     const endCoordinate = swap ? draftStart.point : draftEnd.point;
-    if (editingBoundarySegmentId) {
-      onUpdateSegment(editingBoundarySegmentId, { startPage, endPage, startCoordinate, endCoordinate });
+    if (editingAnnotationSegmentId) {
+      onUpdateSegment(editingAnnotationSegmentId, { startPage, endPage, startCoordinate, endCoordinate });
     } else {
       onCreateSegment({
         name: draftName.trim() || `Segment ${segments.length + 1}`,
@@ -145,16 +154,16 @@ export function SetupScreen({
     cancelDraft();
   }
 
-  const instruction = editingBoundarySegmentId
+  const instruction = editingAnnotationSegmentId
     ? !draftStart
-      ? `Click where "${draftName}" should now start.`
+      ? `Click one corner of the new highlight for "${draftName}".`
       : !draftEnd
-        ? `Click again to mark where "${draftName}" should now end.`
+        ? `Click the opposite corner to redraw "${draftName}".`
         : null
     : !draftStart
-      ? "Click on the score to start marking a Practice Segment."
+      ? "Click one corner of the passage you want to practice."
       : !draftEnd
-        ? "Click again to mark where this segment ends."
+        ? "Click the opposite corner to create a highlighted passage."
         : null;
 
   return (
@@ -217,61 +226,50 @@ export function SetupScreen({
               }}
             />
           ) : (
-            <PdfPageCanvas doc={doc} pageNumber={page} scale={zoom} editable onMark={handleMark}>
-              {draftStart && draftStart.page === page ? (
-                <span
-                  className="segment-pin segment-pin--draft"
-                  style={{ left: `${draftStart.point.x * 100}%`, top: `${draftStart.point.y * 100}%` }}
-                />
-              ) : null}
-              {draftEnd && draftEnd.page === page ? (
-                <span
-                  className="segment-pin segment-pin--draft"
-                  style={{ left: `${draftEnd.point.x * 100}%`, top: `${draftEnd.point.y * 100}%` }}
-                />
-              ) : null}
-              {segmentsOnPage.flatMap((segment) => {
+            <PdfPageCanvas
+              doc={doc}
+              pageNumber={page}
+              scale={zoom}
+              editable
+              onMark={handleMark}
+              onPointPreview={(point) => {
+                if (!draftStart || draftEnd) {
+                  return;
+                }
+                setDraftPreview(point ? { page, point } : null);
+              }}
+            >
+              {(() => {
+                const draftRect = getDraftAnnotationRect(page, draftStart, draftEnd ?? draftPreview);
+                return draftRect ? (
+                  <ScoreAnnotation rect={draftRect} label={editingAnnotationSegmentId ? "Redrawn highlight" : "New passage"} isDraft />
+                ) : null;
+              })()}
+              {segmentsOnPage.map((segment) => {
                 const isActive = segment.id === selectedSegmentId;
-                const marks: JSX.Element[] = [];
-                if (segment.startPage === page && segment.startCoordinate) {
-                  marks.push(
-                    <SegmentSplitMark
-                      key={`${segment.id}-start`}
-                      segment={segment}
-                      number={segmentNumbers.get(segment.id) ?? 0}
-                      point={segment.startCoordinate}
-                      label={`${segment.name} · start`}
-                      isActive={isActive}
-                      onSelect={() => onSelectSegment(segment.id)}
-                    />,
-                  );
-                }
-                if (segment.endPage === page && segment.endCoordinate) {
-                  marks.push(
-                    <SegmentSplitMark
-                      key={`${segment.id}-end`}
-                      segment={segment}
-                      number={segmentNumbers.get(segment.id) ?? 0}
-                      point={segment.endCoordinate}
-                      label={`${segment.name} · end`}
-                      isActive={isActive}
-                      onSelect={() => onSelectSegment(segment.id)}
-                    />,
-                  );
-                }
-                return marks;
+                const rect = getSegmentAnnotationRect(segment, page);
+                return rect ? (
+                  <ScoreAnnotation
+                    key={segment.id}
+                    rect={rect}
+                    number={segmentNumbers.get(segment.id) ?? 0}
+                    label={segment.name}
+                    isActive={isActive}
+                    onSelect={() => onSelectSegment(segment.id)}
+                  />
+                ) : null;
               })}
             </PdfPageCanvas>
           )}
           {segments.length === 0 && pdfSrc ? (
-            <div className="setup-empty-banner">Click on the score to create your first Practice Segment.</div>
+            <div className="setup-empty-banner">Click two corners on the score to highlight your first passage.</div>
           ) : null}
         </div>
 
         {draftStart && draftEnd ? (
           <div className="segment-draft-form">
-            {editingBoundarySegmentId ? (
-              <p className="muted">Redefining boundaries for "{draftName}".</p>
+            {editingAnnotationSegmentId ? (
+              <p className="muted">Redrawing the score highlight for "{draftName}".</p>
             ) : (
               <input
                 className="text-input"
@@ -283,14 +281,14 @@ export function SetupScreen({
             )}
             <div className="bookmark-actions">
               <button className="primary-btn" onClick={confirmDraft}>
-                {editingBoundarySegmentId ? "Save boundaries" : "Create segment"}
+                {editingAnnotationSegmentId ? "Save highlight" : "Create segment"}
               </button>
               <button className="secondary-btn" onClick={cancelDraft}>
                 Cancel
               </button>
             </div>
           </div>
-        ) : editingBoundarySegmentId ? (
+        ) : editingAnnotationSegmentId ? (
           <div className="segment-draft-form">
             <p className="muted">{instruction}</p>
             <div className="bookmark-actions">
@@ -341,12 +339,17 @@ export function SetupScreen({
 
         <section className="panel" data-tour-id="segments-panel">
           <div className="panel__header">
-            <h2>Practice Segments</h2>
-            <p className="muted">{segments.length}</p>
+            <div>
+              <h2>Practice Segments</h2>
+              <p className="muted">{segments.length} passage{segments.length === 1 ? "" : "s"}</p>
+            </div>
+            <button className="secondary-btn" onClick={onOpenPractice} disabled={segments.length === 0}>
+              Practice selected
+            </button>
           </div>
           <div className="stack">
             {segments.length === 0 ? (
-              <p className="muted">No segments yet. Click on the score to create one.</p>
+              <p className="muted">No segments yet. Click two corners on the score to highlight one.</p>
             ) : (
               segments.map((segment) => (
                 <SegmentEditorCard
@@ -358,7 +361,7 @@ export function SetupScreen({
                   onSelect={() => onSelectSegment(segment.id)}
                   onPatch={(patch) => onUpdateSegment(segment.id, patch)}
                   onDelete={() => onDeleteSegment(segment.id)}
-                  onEditBoundary={() => startEditingBoundary(segment)}
+                  onEditAnnotation={() => startEditingAnnotation(segment)}
                 />
               ))
             )}
@@ -371,52 +374,6 @@ export function SetupScreen({
   );
 }
 
-function SegmentSplitMark({
-  segment,
-  number,
-  point,
-  label,
-  isActive,
-  onSelect,
-}: {
-  segment: PracticeSegment;
-  number: number;
-  point: NormalizedPoint;
-  label: string;
-  isActive: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <>
-      <button
-        type="button"
-        className={isActive ? "segment-split-bar segment-split-bar--active" : "segment-split-bar"}
-        style={{ top: `${point.y * 100}%` }}
-        title={segment.name}
-        onClick={(event) => {
-          event.stopPropagation();
-          onSelect();
-        }}
-      >
-        <span className="segment-split-bar__badge">{number}</span>
-      </button>
-      <span className="segment-split-label" style={{ top: `${point.y * 100}%` }}>
-        {label}
-      </span>
-      <button
-        type="button"
-        className={isActive ? "segment-pin segment-pin--active" : "segment-pin"}
-        style={{ left: `${point.x * 100}%`, top: `${point.y * 100}%` }}
-        title={segment.name}
-        onClick={(event) => {
-          event.stopPropagation();
-          onSelect();
-        }}
-      />
-    </>
-  );
-}
-
 function SegmentEditorCard({
   segment,
   number,
@@ -425,7 +382,7 @@ function SegmentEditorCard({
   onSelect,
   onPatch,
   onDelete,
-  onEditBoundary,
+  onEditAnnotation,
 }: {
   segment: PracticeSegment;
   number: number;
@@ -434,18 +391,18 @@ function SegmentEditorCard({
   onSelect: () => void;
   onPatch: (patch: SegmentPatch) => void;
   onDelete: () => void;
-  onEditBoundary: () => void;
+  onEditAnnotation: () => void;
 }) {
   const [name, setName] = useState(segment.name);
   const [notes, setNotes] = useState(segment.notes ?? "");
-  const [startSeconds, setStartSeconds] = useState(msToSeconds(segment.referenceStartMs));
-  const [endSeconds, setEndSeconds] = useState(msToSeconds(segment.referenceEndMs));
+  const [measureStart, setMeasureStart] = useState(numberToInput(segment.measureStart));
+  const [measureEnd, setMeasureEnd] = useState(numberToInput(segment.measureEnd));
 
   useEffect(() => {
     setName(segment.name);
     setNotes(segment.notes ?? "");
-    setStartSeconds(msToSeconds(segment.referenceStartMs));
-    setEndSeconds(msToSeconds(segment.referenceEndMs));
+    setMeasureStart(numberToInput(segment.measureStart));
+    setMeasureEnd(numberToInput(segment.measureEnd));
   }, [segment]);
 
   return (
@@ -463,6 +420,30 @@ function SegmentEditorCard({
       <p className="muted">
         Page {segment.startPage === segment.endPage ? segment.startPage : `${segment.startPage}-${segment.endPage}`}
       </p>
+      <div className="bookmark-form__row" onClick={(event) => event.stopPropagation()}>
+        <label>
+          First measure
+          <input
+            className="text-input"
+            type="number"
+            min={1}
+            value={measureStart}
+            onChange={(event) => setMeasureStart(event.target.value)}
+            onBlur={() => onPatch({ measureStart: inputToNumber(measureStart) })}
+          />
+        </label>
+        <label>
+          Last measure
+          <input
+            className="text-input"
+            type="number"
+            min={1}
+            value={measureEnd}
+            onChange={(event) => setMeasureEnd(event.target.value)}
+            onBlur={() => onPatch({ measureEnd: inputToNumber(measureEnd) })}
+          />
+        </label>
+      </div>
       <label className="field-inline field-inline--compact" onClick={(event) => event.stopPropagation()}>
         Status
         <select
@@ -492,30 +473,7 @@ function SegmentEditorCard({
           ))}
         </select>
       </label>
-      <div className="bookmark-form__row" onClick={(event) => event.stopPropagation()}>
-        <label>
-          Start (s)
-          <input
-            className="text-input"
-            type="number"
-            min={0}
-            value={startSeconds}
-            onChange={(event) => setStartSeconds(event.target.value)}
-            onBlur={() => onPatch({ referenceStartMs: secondsToMs(startSeconds) })}
-          />
-        </label>
-        <label>
-          End (s)
-          <input
-            className="text-input"
-            type="number"
-            min={0}
-            value={endSeconds}
-            onChange={(event) => setEndSeconds(event.target.value)}
-            onBlur={() => onPatch({ referenceEndMs: secondsToMs(endSeconds) })}
-          />
-        </label>
-      </div>
+      <p className="segment-audio-summary">{formatTimingRange(segment)}</p>
       <textarea
         className="notes notes--compact"
         value={notes}
@@ -525,8 +483,8 @@ function SegmentEditorCard({
         placeholder="Practice notes for this segment."
       />
       <div className="bookmark-actions" onClick={(event) => event.stopPropagation()}>
-        <button className="secondary-btn" onClick={onEditBoundary}>
-          Redefine boundaries
+        <button className="secondary-btn" onClick={onEditAnnotation}>
+          Redraw highlight
         </button>
         <button
           className="link-btn"
@@ -542,14 +500,30 @@ function SegmentEditorCard({
   );
 }
 
-function msToSeconds(value: number | null): string {
-  return value == null ? "" : String(Math.round(value / 1000));
+function numberToInput(value: number | null): string {
+  return value == null ? "" : String(value);
 }
 
-function secondsToMs(value: string): number | null {
+function inputToNumber(value: string): number | null {
   if (value.trim() === "") {
     return null;
   }
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.round(parsed * 1000) : null;
+  return Number.isFinite(parsed) ? Math.max(1, Math.round(parsed)) : null;
+}
+
+function formatTimingRange(segment: PracticeSegment): string {
+  if (segment.referenceStartMs == null || segment.referenceEndMs == null) {
+    return "Reference timing: not mapped yet";
+  }
+  const start = Math.min(segment.referenceStartMs, segment.referenceEndMs) / 1000;
+  const end = Math.max(segment.referenceStartMs, segment.referenceEndMs) / 1000;
+  return `Reference timing: ${formatTime(start)} - ${formatTime(end)}`;
+}
+
+function formatTime(value: number): string {
+  const totalSeconds = Math.max(0, Math.floor(value));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }

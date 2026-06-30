@@ -62,9 +62,13 @@ type PdfPageCanvasProps = {
   scale?: number;
   editable?: boolean;
   onMark?: (point: NormalizedPoint) => void;
+  onPointPreview?: (point: NormalizedPoint | null) => void;
   className?: string;
+  fitToContainer?: boolean;
   children?: ReactNode;
-  /** Normalized (0-1) vertical window of the page to display; omit to show the full page. */
+  /** Normalized (0-1) page window to display; omit to show the full page. */
+  cropLeft?: number;
+  cropRight?: number;
   cropTop?: number;
   cropBottom?: number;
 };
@@ -75,16 +79,24 @@ export function PdfPageCanvas({
   scale = 1.2,
   editable = false,
   onMark,
+  onPointPreview,
   className,
+  fitToContainer = false,
   children,
+  cropLeft,
+  cropRight,
   cropTop,
   cropBottom,
 }: PdfPageCanvasProps) {
+  const pageRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [renderedSize, setRenderedSize] = useState({ width: 0, height: 0 });
+  const [fitDisplayWidth, setFitDisplayWidth] = useState<number | null>(null);
+  const left = clamp01(cropLeft ?? 0);
+  const right = clamp01(cropRight ?? 1);
   const top = clamp01(cropTop ?? 0);
   const bottom = clamp01(cropBottom ?? 1);
-  const isCropped = bottom > top && (top > 0 || bottom < 1);
+  const isCropped = right > left && bottom > top && (left > 0 || right < 1 || top > 0 || bottom < 1);
 
   useEffect(() => {
     if (!doc || pageNumber < 1) {
@@ -107,10 +119,21 @@ export function PdfPageCanvas({
       if (!context) {
         return;
       }
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      setRenderedSize({ width: viewport.width, height: viewport.height });
-      renderTask = page.render({ canvasContext: context, viewport });
+      const cropX = isCropped ? left * viewport.width : 0;
+      const cropY = isCropped ? top * viewport.height : 0;
+      const renderWidth = isCropped ? (right - left) * viewport.width : viewport.width;
+      const renderHeight = isCropped ? (bottom - top) * viewport.height : viewport.height;
+      canvas.width = renderWidth;
+      canvas.height = renderHeight;
+      setRenderedSize({ width: renderWidth, height: renderHeight });
+      context.clearRect(0, 0, renderWidth, renderHeight);
+      context.fillStyle = "#fff";
+      context.fillRect(0, 0, renderWidth, renderHeight);
+      renderTask = page.render({
+        canvasContext: context,
+        viewport,
+        transform: isCropped ? [1, 0, 0, 1, -cropX, -cropY] : undefined,
+      });
       try {
         await renderTask.promise;
       } catch {
@@ -122,41 +145,87 @@ export function PdfPageCanvas({
       cancelled = true;
       renderTask?.cancel();
     };
-  }, [doc, pageNumber, scale]);
+  }, [bottom, doc, isCropped, left, pageNumber, right, scale, top]);
+
+  useEffect(() => {
+    if (!fitToContainer || renderedSize.width <= 0 || renderedSize.height <= 0) {
+      setFitDisplayWidth(null);
+      return;
+    }
+
+    function updateFitWidth() {
+      const parent = pageRef.current?.parentElement;
+      if (!parent) {
+        return;
+      }
+      const aspectRatio = renderedSize.width / renderedSize.height;
+      const availableWidth = parent.clientWidth || renderedSize.width;
+      const availableHeight = Math.max(260, window.innerHeight - 360);
+      const nextWidth = Math.max(180, Math.min(renderedSize.width, availableWidth, availableHeight * aspectRatio));
+      setFitDisplayWidth((current) => (current != null && Math.abs(current - nextWidth) < 1 ? current : nextWidth));
+    }
+
+    updateFitWidth();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updateFitWidth);
+    const parent = pageRef.current?.parentElement;
+    if (observer && parent) {
+      observer.observe(parent);
+    }
+    window.addEventListener("resize", updateFitWidth);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", updateFitWidth);
+    };
+  }, [fitToContainer, renderedSize.height, renderedSize.width]);
+
+  function pointFromEvent(event: MouseEvent<HTMLDivElement>): NormalizedPoint {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const x = bounds.width > 0 ? (event.clientX - bounds.left) / bounds.width : 0;
+    const y = bounds.height > 0 ? (event.clientY - bounds.top) / bounds.height : 0;
+    return { x: clamp01(x), y: clamp01(y) };
+  }
 
   function handleClick(event: MouseEvent<HTMLDivElement>) {
     if (!editable || !onMark) {
       return;
     }
-    const bounds = event.currentTarget.getBoundingClientRect();
-    const x = bounds.width > 0 ? (event.clientX - bounds.left) / bounds.width : 0;
-    const y = bounds.height > 0 ? (event.clientY - bounds.top) / bounds.height : 0;
-    onMark({ x: clamp01(x), y: clamp01(y) });
+    onMark(pointFromEvent(event));
   }
 
-  const inner = (
+  function handleMouseMove(event: MouseEvent<HTMLDivElement>) {
+    if (!editable || !onPointPreview) {
+      return;
+    }
+    onPointPreview(pointFromEvent(event));
+  }
+
+  const pageClassName = [
+    "pdf-page",
+    className ?? "",
+    fitToContainer ? "pdf-page--fit" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const pageStyle =
+    fitToContainer && renderedSize.width > 0 && renderedSize.height > 0
+      ? {
+          width: `min(${fitDisplayWidth ?? renderedSize.width}px, 100%)`,
+          aspectRatio: `${renderedSize.width} / ${renderedSize.height}`,
+        }
+      : { width: renderedSize.width || undefined, height: renderedSize.height || undefined };
+
+  return (
     <div
-      className={className ? `pdf-page ${className}` : "pdf-page"}
-      style={{ width: renderedSize.width || undefined, height: renderedSize.height || undefined }}
+      ref={pageRef}
+      className={pageClassName}
+      style={pageStyle}
       onClick={handleClick}
+      onMouseMove={handleMouseMove}
+      onMouseLeave={() => onPointPreview?.(null)}
       data-editable={editable ? "true" : "false"}
     >
       <canvas ref={canvasRef} className="pdf-page__canvas" />
       <div className="pdf-page__overlay">{children}</div>
-    </div>
-  );
-
-  if (!isCropped || !renderedSize.height) {
-    return inner;
-  }
-
-  const cropHeight = (bottom - top) * renderedSize.height;
-
-  return (
-    <div className="pdf-page-crop" style={{ width: renderedSize.width, height: cropHeight }}>
-      <div className="pdf-page-crop__inner" style={{ top: -(top * renderedSize.height) }}>
-        {inner}
-      </div>
     </div>
   );
 }

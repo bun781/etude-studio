@@ -10,6 +10,7 @@ import type {
   DeleteProjectInput,
   ImportAssetInput,
   PracticeActivity,
+  PracticeSegment,
   PracticeSession,
   PracticeStats,
   ProjectDetail,
@@ -20,6 +21,41 @@ import type {
   SaveRecordingInput,
   UpdateRecordingInput,
 } from "./types";
+
+// The Rust backend serializes segment boundaries as flat startX/startY/endX/endY
+// fields, while the frontend models them as startCoordinate/endCoordinate objects.
+// Normalize the wire shape into the frontend shape right after each invoke() call.
+type RawPracticeSegment = Omit<PracticeSegment, "startCoordinate" | "endCoordinate"> & {
+  startX: number | null;
+  startY: number | null;
+  endX: number | null;
+  endY: number | null;
+};
+
+type RawProjectDetail = Omit<ProjectDetail, "score"> & {
+  score: (Omit<NonNullable<ProjectDetail["score"]>, "segments"> & { segments: RawPracticeSegment[] }) | null;
+};
+
+function normalizeSegment(raw: RawPracticeSegment): PracticeSegment {
+  const { startX, startY, endX, endY, ...rest } = raw;
+  return {
+    ...rest,
+    startCoordinate: startX != null && startY != null ? { x: startX, y: startY } : null,
+    endCoordinate: endX != null && endY != null ? { x: endX, y: endY } : null,
+  };
+}
+
+function normalizeProjectDetail(raw: RawProjectDetail): ProjectDetail {
+  return {
+    ...raw,
+    score: raw.score ? { ...raw.score, segments: raw.score.segments.map(normalizeSegment) } : null,
+  };
+}
+
+async function invokeProjectDetail(cmd: string, args?: Record<string, unknown>): Promise<ProjectDetail> {
+  const raw = await invoke<RawProjectDetail>(cmd, args);
+  return normalizeProjectDetail(raw);
+}
 
 export async function listProjects(): Promise<ProjectSummary[]> {
   return invoke("list_projects");
@@ -38,63 +74,63 @@ export async function deleteProject(input: DeleteProjectInput): Promise<void> {
 }
 
 export async function loadProject(projectId: string): Promise<ProjectDetail> {
-  return invoke("load_project", { projectId });
+  return invokeProjectDetail("load_project", { projectId });
 }
 
 export async function importScore(input: ImportAssetInput): Promise<ProjectDetail> {
-  return invoke("import_score", { input });
+  return invokeProjectDetail("import_score", { input });
 }
 
 export async function importReference(input: ImportAssetInput): Promise<ProjectDetail> {
-  return invoke("import_reference", { input });
+  return invokeProjectDetail("import_reference", { input });
 }
 
 export async function setActiveReference(projectId: string, referenceId: string | null): Promise<ProjectDetail> {
-  return invoke("set_active_reference", { projectId, referenceId });
+  return invokeProjectDetail("set_active_reference", { projectId, referenceId });
 }
 
 export async function deleteReference(projectId: string, referenceId: string): Promise<ProjectDetail> {
-  return invoke("delete_reference", { projectId, referenceId });
+  return invokeProjectDetail("delete_reference", { projectId, referenceId });
 }
 
 export async function savePracticeSegment(input: SavePracticeSegmentInput): Promise<ProjectDetail> {
-  return invoke("save_practice_segment", { input });
+  return invokeProjectDetail("save_practice_segment", { input });
 }
 
 export async function deletePracticeSegment(projectId: string, segmentId: string): Promise<ProjectDetail> {
-  return invoke("delete_practice_segment", { projectId, segmentId });
+  return invokeProjectDetail("delete_practice_segment", { projectId, segmentId });
 }
 
 export async function reorderPracticeSegments(input: ReorderPracticeSegmentsInput): Promise<ProjectDetail> {
-  return invoke("reorder_practice_segments", { input });
+  return invokeProjectDetail("reorder_practice_segments", { input });
 }
 
 export async function saveProjectNote(projectId: string, text: string): Promise<ProjectDetail> {
-  return invoke("save_project_note", { projectId, text });
+  return invokeProjectDetail("save_project_note", { projectId, text });
 }
 
 export async function registerRecording(input: SaveRecordingInput): Promise<ProjectDetail> {
-  return invoke("register_recording", { input });
+  return invokeProjectDetail("register_recording", { input });
 }
 
 export async function setActiveRecording(projectId: string, recordingId: string | null): Promise<ProjectDetail> {
-  return invoke("set_active_recording", { projectId, recordingId });
+  return invokeProjectDetail("set_active_recording", { projectId, recordingId });
 }
 
 export async function updateRecording(input: UpdateRecordingInput): Promise<ProjectDetail> {
-  return invoke("update_recording", { input });
+  return invokeProjectDetail("update_recording", { input });
 }
 
 export async function deleteRecording(projectId: string, recordingId: string): Promise<ProjectDetail> {
-  return invoke("delete_recording", { projectId, recordingId });
+  return invokeProjectDetail("delete_recording", { projectId, recordingId });
 }
 
 export async function duplicateRecording(input: DuplicateRecordingInput): Promise<ProjectDetail> {
-  return invoke("duplicate_recording", { input });
+  return invokeProjectDetail("duplicate_recording", { input });
 }
 
 export async function endPracticeSession(input: EndPracticeSessionInput): Promise<ProjectDetail> {
-  return invoke("end_practice_session", { input });
+  return invokeProjectDetail("end_practice_session", { input });
 }
 
 export async function openScoreFile(): Promise<string | null> {
