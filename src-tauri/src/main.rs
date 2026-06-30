@@ -5,6 +5,7 @@ mod models;
 mod storage;
 
 use commands::*;
+use tauri::Manager;
 use storage::ensure_workspace;
 
 fn main() {
@@ -32,9 +33,12 @@ fn main() {
       delete_bookmark,
       save_project_note,
       register_recording,
-      set_active_recording
+      set_active_recording,
+      update_recording,
+      delete_recording,
+      duplicate_recording,
+      end_practice_session
     ])
     .run(tauri::generate_context!())
     .expect("failed to run app");
 }
-

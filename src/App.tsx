@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ProjectHeader } from "./components/ProjectHeader";
 import { ProjectLibrary } from "./components/ProjectLibrary";
 import { ScorePanel } from "./components/ScorePanel";
+import { RecordingBrowser } from "./components/RecordingBrowser";
 import { Sidebar } from "./components/Sidebar";
 import { TransportPanel } from "./components/TransportPanel";
 import {
@@ -10,7 +11,11 @@ import {
   deleteBookmark,
   deleteMarker,
   deleteProject,
+  deleteRecording,
   deleteReference,
+  dirnamePath,
+  duplicateRecording,
+  endPracticeSession,
   importReference,
   importScore,
   joinPath,
@@ -18,6 +23,7 @@ import {
   listProjects,
   openAudioFile,
   openScoreFile,
+  openPathInFinder,
   registerRecording,
   renameProject,
   saveBookmark,
@@ -27,6 +33,7 @@ import {
   saveProjectNote,
   setActiveRecording,
   setActiveReference,
+  updateRecording,
   toFileSrc,
 } from "./lib/api";
 import { deriveLoopTimes, estimateCurrentMeasure, estimateMeasureTimestamp } from "./lib/measure";
@@ -34,6 +41,9 @@ import type {
   Bookmark,
   LoopRange,
   MeasureMarker,
+  PracticeActivity,
+  PracticeSession,
+  PracticeStats,
   ProjectDetail,
   ProjectSummary,
   RecordingAttempt,
@@ -41,6 +51,46 @@ import type {
 } from "./lib/types";
 
 type CompareMode = "reference" | "recording";
+type BookmarkStatus = string;
+
+type StoredPreferences = {
+  compareMode: CompareMode;
+  playbackRate: number;
+  selectedProjectId: string | null;
+  scoreZoom: number;
+  timelineZoom: number;
+};
+
+type BookmarkDraft = {
+  measureStart: number;
+  measureEnd: number;
+  label: string;
+  noteText: string;
+  color: string;
+  status: BookmarkStatus;
+  activateLoop: boolean;
+};
+
+const BOOKMARK_STATUS_ORDER: BookmarkStatus[] = [
+  "Needs Work",
+  "Teacher Assigned",
+  "In Progress",
+  "Not Started",
+  "Completed",
+  "Favorite",
+];
+
+const BOOKMARK_LABEL_SUGGESTIONS = [
+  "Difficult",
+  "Intonation",
+  "Rhythm",
+  "Fingering",
+  "Bowing",
+  "Phrasing",
+  "Dynamics",
+  "Teacher",
+  "Performance",
+];
 
 const DEFAULT_MARKER_DRAFT = {
   measureNumber: 1,
@@ -49,31 +99,79 @@ const DEFAULT_MARKER_DRAFT = {
   noteText: "",
 };
 
+const DEFAULT_PREFERENCES: StoredPreferences = {
+  compareMode: "reference",
+  playbackRate: 1,
+  selectedProjectId: null,
+  scoreZoom: 1,
+  timelineZoom: 1,
+};
+
+const DEFAULT_BOOKMARK_DRAFT: BookmarkDraft = {
+  measureStart: 1,
+  measureEnd: 1,
+  label: "Needs Work",
+  noteText: "",
+  color: "#7ec8ff",
+  status: "Needs Work",
+  activateLoop: false,
+};
+
 function App() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
+  const noteSaveTimerRef = useRef<number | null>(null);
+  const lastSavedNoteRef = useRef<{ projectId: string | null; text: string }>({
+    projectId: null,
+    text: "",
+  });
+  const noteHydratingRef = useRef(false);
+  const pendingSeekRef = useRef<number | null>(null);
+  const [preferences, setPreferences] = useState<StoredPreferences>(() => readStoredPreferences());
 
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [project, setProject] = useState<ProjectDetail | null>(null);
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(preferences.selectedProjectId);
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const [noteText, setNoteText] = useState("");
+  const [bookmarkDraft, setBookmarkDraft] = useState<BookmarkDraft>(DEFAULT_BOOKMARK_DRAFT);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [currentMeasure, setCurrentMeasure] = useState(1);
-  const [playbackRate, setPlaybackRate] = useState(1);
+  const [playbackRate, setPlaybackRate] = useState(preferences.playbackRate);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [compareMode, setCompareMode] = useState<CompareMode>("reference");
+  const [compareMode, setCompareMode] = useState<CompareMode>(preferences.compareMode);
   const [isRecording, setIsRecording] = useState(false);
   const [markerDraft, setMarkerDraft] = useState(DEFAULT_MARKER_DRAFT);
   const [loopDraft, setLoopDraft] = useState({ startMeasure: 1, endMeasure: 4 });
   const [statusMessage, setStatusMessage] = useState("Ready.");
+  const [scoreZoom, setScoreZoom] = useState(preferences.scoreZoom);
+  const [timelineZoom, setTimelineZoom] = useState(preferences.timelineZoom);
 
   useEffect(() => {
     void refreshProjects();
   }, []);
+
+  useEffect(() => {
+    setPreferences((current) => ({
+      ...current,
+      compareMode,
+      playbackRate,
+      selectedProjectId,
+      scoreZoom,
+      timelineZoom,
+    }));
+  }, [compareMode, playbackRate, scoreZoom, selectedProjectId, timelineZoom]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("reference-practice.preferences", JSON.stringify(preferences));
+    } catch {
+      // Ignore storage failures in constrained environments.
+    }
+  }, [preferences]);
 
   useEffect(() => {
     if (!project) {
@@ -97,7 +195,83 @@ function App() {
         endMeasure: Math.max(currentMeasure, currentMeasure + 3),
       });
     }
+    setBookmarkDraft((current) => ({
+      ...current,
+      measureStart: currentMeasure,
+      measureEnd: Math.max(currentMeasure, currentMeasure + 3),
+    }));
   }, [project, currentMeasure, currentTime]);
+
+  useEffect(() => {
+    if (noteSaveTimerRef.current != null) {
+      window.clearTimeout(noteSaveTimerRef.current);
+    }
+    if (!project) {
+      return;
+    }
+    noteHydratingRef.current = true;
+    lastSavedNoteRef.current = {
+      projectId: project.project.id,
+      text: project.note.text,
+    };
+    setNoteText(project.note.text);
+  }, [project]);
+
+  useEffect(() => {
+    const currentProjectId = project?.project.id;
+    if (!currentProjectId) {
+      return;
+    }
+    const projectId = currentProjectId;
+
+    function handleBeforeUnload() {
+      void endPracticeSession({ projectId });
+    }
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [project?.project.id]);
+
+  useEffect(() => {
+    if (!project) {
+      return;
+    }
+    if (noteHydratingRef.current) {
+      if (noteText === project.note.text) {
+        noteHydratingRef.current = false;
+      }
+      return;
+    }
+    if (
+      lastSavedNoteRef.current.projectId === project.project.id &&
+      lastSavedNoteRef.current.text === noteText
+    ) {
+      return;
+    }
+    if (noteSaveTimerRef.current != null) {
+      window.clearTimeout(noteSaveTimerRef.current);
+    }
+    noteSaveTimerRef.current = window.setTimeout(() => {
+      void (async () => {
+        const detail = await saveProjectNote(project.project.id, noteText);
+        if (detail.project.id === project.project.id) {
+          setProject(detail);
+          lastSavedNoteRef.current = {
+            projectId: detail.project.id,
+            text: detail.note.text,
+          };
+        }
+      })();
+    }, 350);
+
+    return () => {
+      if (noteSaveTimerRef.current != null) {
+        window.clearTimeout(noteSaveTimerRef.current);
+      }
+    };
+  }, [noteText, project]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -107,6 +281,13 @@ function App() {
 
     const handleLoadedMetadata = () => {
       setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
+      if (pendingSeekRef.current != null) {
+        const nextTime = Math.max(0, Math.min(audio.duration || pendingSeekRef.current, pendingSeekRef.current));
+        pendingSeekRef.current = null;
+        audio.currentTime = nextTime;
+        setCurrentTime(nextTime);
+        setCurrentMeasure(estimateCurrentMeasure(nextTime * 1000, project?.markers ?? []));
+      }
     };
 
     const handlePlay = () => setIsPlaying(true);
@@ -185,6 +366,7 @@ function App() {
 
     let cancelled = false;
     void (async () => {
+      pendingSeekRef.current = audio.currentTime;
       const absolutePath = await joinPath(project.project.rootPath, source.relativePath);
       if (cancelled) {
         return;
@@ -202,19 +384,42 @@ function App() {
     };
   }, [project, compareMode, playbackRate]);
 
+  useEffect(() => {
+    if (!project) {
+      return;
+    }
+    const source = resolveSource(project, compareMode);
+    if (source) {
+      return;
+    }
+    if (compareMode === "recording" && resolveReference(project)) {
+      setCompareMode("reference");
+      return;
+    }
+    if (compareMode === "reference" && resolveRecording(project)) {
+      setCompareMode("recording");
+    }
+  }, [project, compareMode]);
+
   async function refreshProjects(selectedId?: string | null) {
     const items = await listProjects();
     setProjects(items);
     if (selectedId) {
       setSelectedProjectId(selectedId);
-    } else if (items.length > 0) {
-      setSelectedProjectId(items[0].id);
-    } else {
-      setSelectedProjectId(null);
+      return;
     }
+    setSelectedProjectId((current) => {
+      if (current && items.some((projectItem) => projectItem.id === current)) {
+        return current;
+      }
+      return items[0]?.id ?? null;
+    });
   }
 
   async function openProjectById(projectId: string) {
+    if (project && project.project.id !== projectId) {
+      await endPracticeSession({ projectId: project.project.id });
+    }
     const detail = await loadProject(projectId);
     setProject(detail);
     setSelectedProjectId(projectId);
@@ -260,6 +465,7 @@ function App() {
     if (!confirmDelete) {
       return;
     }
+    await endPracticeSession({ projectId: project.project.id });
     await deleteProject({ projectId: project.project.id });
     setProject(null);
     setSelectedProjectId(null);
@@ -327,6 +533,75 @@ function App() {
     setStatusMessage("Active recording updated.");
   }
 
+  async function handleSaveRecording(
+    recordingId: string,
+    draft: { name: string; notes: string; measureStart: string; measureEnd: string; referenceId: string },
+  ) {
+    if (!project) {
+      return;
+    }
+    const detail = await updateRecording({
+      projectId: project.project.id,
+      recordingId,
+      name: draft.name.trim() || "Untitled Take",
+      notes: draft.notes.trim() || null,
+      measureStart: draft.measureStart ? Number(draft.measureStart) || null : null,
+      measureEnd: draft.measureEnd ? Number(draft.measureEnd) || null : null,
+      referenceId: draft.referenceId || null,
+    });
+    setProject(detail);
+    await refreshProjects(detail.project.id);
+    setStatusMessage("Recording updated.");
+  }
+
+  async function handleDeleteRecording(recordingId: string) {
+    if (!project) {
+      return;
+    }
+    const recording = project.recordings.find((item) => item.id === recordingId);
+    const confirmDelete = window.confirm(
+      `Delete metadata for ${recording?.name ?? "this recording"}? The audio file will stay on disk unless you remove it manually.`,
+    );
+    if (!confirmDelete) {
+      return;
+    }
+    const detail = await deleteRecording(project.project.id, recordingId);
+    setProject(detail);
+    if (project.project.activeRecordingId === recordingId && detail.recordings.length > 0) {
+      const activeDetail = await setActiveRecording(detail.project.id, detail.recordings[0].id);
+      setProject(activeDetail);
+    }
+    await refreshProjects(project.project.id);
+    setStatusMessage("Recording metadata deleted.");
+  }
+
+  async function handleDuplicateRecording(recordingId: string) {
+    if (!project) {
+      return;
+    }
+    const detail = await duplicateRecording({
+      projectId: project.project.id,
+      recordingId,
+    });
+    setProject(detail);
+    await refreshProjects(detail.project.id);
+    setStatusMessage("Recording duplicated.");
+  }
+
+  async function handleOpenRecordingFolder(recordingId: string) {
+    if (!project) {
+      return;
+    }
+    const recording = project.recordings.find((item) => item.id === recordingId);
+    if (!recording) {
+      return;
+    }
+    const absolutePath = await joinPath(project.project.rootPath, recording.relativePath);
+    const folderPath = await dirnamePath(absolutePath);
+    await openPathInFinder(folderPath);
+    setStatusMessage("Opened recording folder.");
+  }
+
   async function handleAddMarker() {
     if (!project) {
       return;
@@ -388,19 +663,43 @@ function App() {
     setStatusMessage("Loop cleared.");
   }
 
-  async function handleAddBookmark() {
+  async function handleSaveBookmark() {
     if (!project) {
       return;
     }
     const detail = await saveBookmark({
       projectId: project.project.id,
       bookmark: {
-        name: `Bookmark ${project.bookmarks.length + 1}`,
-        measureNumber: currentMeasure,
+        measureStart: Math.min(bookmarkDraft.measureStart, bookmarkDraft.measureEnd),
+        measureEnd: Math.max(bookmarkDraft.measureStart, bookmarkDraft.measureEnd),
+        label: bookmarkDraft.label.trim() || `Bookmark ${project.bookmarks.length + 1}`,
+        noteText: bookmarkDraft.noteText.trim() || null,
+        color: bookmarkDraft.color || null,
+        status: bookmarkDraft.status,
       },
     });
     setProject(detail);
+    if (bookmarkDraft.activateLoop) {
+      const loopDetail = await saveLoopRange({
+        projectId: project.project.id,
+        loopRange: {
+          name: bookmarkDraft.label.trim() || "Bookmark loop",
+          startMeasure: Math.min(bookmarkDraft.measureStart, bookmarkDraft.measureEnd),
+          endMeasure: Math.max(bookmarkDraft.measureStart, bookmarkDraft.measureEnd),
+          isActive: true,
+        },
+      });
+      setProject(loopDetail);
+    }
     setStatusMessage("Bookmark saved.");
+  }
+
+  function handleUseCurrentMeasureForBookmark() {
+    setBookmarkDraft((current) => ({
+      ...current,
+      measureStart: currentMeasure,
+      measureEnd: Math.max(currentMeasure, currentMeasure + 3),
+    }));
   }
 
   async function handleDeleteBookmark(bookmarkId: string) {
@@ -414,11 +713,6 @@ function App() {
 
   async function handleSaveNote(text: string) {
     setNoteText(text);
-    if (!project) {
-      return;
-    }
-    const detail = await saveProjectNote(project.project.id, text);
-    setProject(detail);
   }
 
   async function handlePlayPause() {
@@ -427,10 +721,14 @@ function App() {
       setStatusMessage("Import a reference or recording before playback.");
       return;
     }
-    if (audio.paused) {
-      await audio.play();
-    } else {
-      audio.pause();
+    try {
+      if (audio.paused) {
+        await audio.play();
+      } else {
+        audio.pause();
+      }
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Playback could not start.");
     }
   }
 
@@ -488,6 +786,10 @@ function App() {
       const measureStart = project.loopRange?.startMeasure ?? currentMeasure;
       const measureEnd = project.loopRange?.endMeasure ?? currentMeasure + 4;
       const startedAt = currentIsoTimestamp();
+      const audio = audioRef.current;
+      if (audio && !audio.paused) {
+        audio.pause();
+      }
 
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
@@ -512,6 +814,7 @@ function App() {
           fileName,
           relativePath,
           name: `Take ${project.recordings.length + 1}`,
+          referenceId: project.project.activeReferenceId,
           measureStart,
           measureEnd,
           recordedAt: startedAt,
@@ -562,8 +865,11 @@ function App() {
             <>
               <ScorePanel
                 score={project.score}
+                bookmarks={project.bookmarks}
                 currentMeasure={currentMeasure}
                 totalMeasures={project.score?.measureCount ?? Math.max(currentMeasure, 1)}
+                zoom={scoreZoom}
+                onZoomChange={setScoreZoom}
                 onMeasureClick={(measureNumber) => {
                   void handleMeasureClick(measureNumber);
                 }}
@@ -574,6 +880,9 @@ function App() {
                 playbackRate={playbackRate}
                 duration={duration}
                 currentTime={currentTime}
+                zoom={timelineZoom}
+                markers={project.markers}
+                loopRange={project.loopRange}
                 activeSourceLabel={resolveSourceLabel(project, compareMode)}
                 compareMode={compareMode}
                 selectedReference={resolveReference(project)}
@@ -592,7 +901,33 @@ function App() {
                     }
                   }
                 }}
+                onZoomChange={setTimelineZoom}
                 onCompareModeChange={setCompareMode}
+                onSetLoop={(startMeasure, endMeasure) => {
+                  void handleSaveLoop(startMeasure, endMeasure);
+                }}
+              />
+
+              <RecordingBrowser
+                projectName={project.project.name}
+                recordings={project.recordings}
+                references={project.references}
+                selectedRecordingId={project.project.activeRecordingId ?? null}
+                onSelectRecording={(recordingId) => {
+                  void handleSelectRecording(recordingId);
+                }}
+                onSaveRecording={(recordingId, draft) => {
+                  void handleSaveRecording(recordingId, draft);
+                }}
+                onDeleteRecording={(recordingId) => {
+                  void handleDeleteRecording(recordingId);
+                }}
+                onDuplicateRecording={(recordingId) => {
+                  void handleDuplicateRecording(recordingId);
+                }}
+                onOpenRecordingFolder={(recordingId) => {
+                  void handleOpenRecordingFolder(recordingId);
+                }}
               />
 
               <div className="panel">
@@ -617,17 +952,23 @@ function App() {
           markers={project?.markers ?? []}
           loopRange={project?.loopRange ?? null}
           bookmarks={project?.bookmarks ?? []}
-          recordings={project?.recordings ?? []}
+          practiceSessions={project?.practiceSessions ?? []}
+          recentActivity={project?.recentActivity ?? []}
+          stats={project?.stats ?? {
+            todayMs: 0,
+            weekMs: 0,
+            recordingAttempts: 0,
+            bookmarkCount: 0,
+            mostPracticedRanges: [],
+          }}
           note={{ text: noteText, updatedAt: project?.note.updatedAt ?? null }}
-          selectedRecordingId={project?.project.activeRecordingId ?? null}
+          bookmarkDraft={bookmarkDraft}
+          setBookmarkDraft={setBookmarkDraft}
           onSelectReference={(referenceId) => {
             void handleSelectReference(referenceId);
           }}
           onDeleteReference={(referenceId) => {
             void handleDeleteReference(referenceId);
-          }}
-          onSelectRecording={(recordingId) => {
-            void handleSelectRecording(recordingId);
           }}
           onDeleteMarker={(markerId) => {
             void handleDeleteMarker(markerId);
@@ -650,10 +991,12 @@ function App() {
           onAddMarkerAtCurrent={() => {
             void handleAddMarker();
           }}
-          onAddBookmarkAtCurrent={() => {
-            void handleAddBookmark();
+          onUseCurrentMeasureForBookmark={() => {
+            void handleUseCurrentMeasureForBookmark();
           }}
-          currentMeasure={currentMeasure}
+          onSaveBookmark={() => {
+            void handleSaveBookmark();
+          }}
           loopDraft={loopDraft}
           setLoopDraft={setLoopDraft}
           markerDraft={markerDraft}
@@ -661,7 +1004,7 @@ function App() {
         />
       </div>
 
-      <audio ref={audioRef} hidden />
+      <audio ref={audioRef} hidden preload="auto" />
     </div>
   );
 }
@@ -692,6 +1035,31 @@ async function importMusicXmlPath(): Promise<string | null> {
 
 async function importAudioPath(): Promise<string | null> {
   return openAudioFile();
+}
+
+function readStoredPreferences(): StoredPreferences {
+  if (typeof window === "undefined") {
+    return DEFAULT_PREFERENCES;
+  }
+
+  try {
+    const raw = window.localStorage.getItem("reference-practice.preferences");
+    if (!raw) {
+      return DEFAULT_PREFERENCES;
+    }
+    const parsed = JSON.parse(raw) as Partial<StoredPreferences>;
+    return {
+      compareMode: parsed.compareMode === "recording" ? "recording" : "reference",
+      playbackRate:
+        typeof parsed.playbackRate === "number" && Number.isFinite(parsed.playbackRate) ? parsed.playbackRate : 1,
+      selectedProjectId: typeof parsed.selectedProjectId === "string" ? parsed.selectedProjectId : null,
+      scoreZoom: typeof parsed.scoreZoom === "number" && Number.isFinite(parsed.scoreZoom) ? parsed.scoreZoom : 1,
+      timelineZoom:
+        typeof parsed.timelineZoom === "number" && Number.isFinite(parsed.timelineZoom) ? parsed.timelineZoom : 1,
+    };
+  } catch {
+    return DEFAULT_PREFERENCES;
+  }
 }
 
 export default App;

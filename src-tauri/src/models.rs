@@ -72,8 +72,18 @@ pub struct SaveBookmarkInput {
 #[serde(rename_all = "camelCase")]
 pub struct BookmarkDraft {
   pub id: Option<String>,
-  pub name: String,
-  pub measure_number: i64,
+  pub measure_start: i64,
+  pub measure_end: i64,
+  pub label: String,
+  pub note_text: Option<String>,
+  pub color: Option<String>,
+  pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndPracticeSessionInput {
+  pub project_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,10 +93,30 @@ pub struct SaveRecordingInput {
   pub file_name: String,
   pub relative_path: String,
   pub name: String,
+  pub reference_id: Option<String>,
   pub measure_start: Option<i64>,
   pub measure_end: Option<i64>,
   pub recorded_at: String,
   pub duration_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateRecordingInput {
+  pub project_id: String,
+  pub recording_id: String,
+  pub name: String,
+  pub notes: Option<String>,
+  pub measure_start: Option<i64>,
+  pub measure_end: Option<i64>,
+  pub reference_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateRecordingInput {
+  pub project_id: String,
+  pub recording_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +130,7 @@ pub struct ProjectSummary {
   pub last_opened_at: String,
   pub active_reference_id: Option<String>,
   pub active_recording_id: Option<String>,
+  pub active_practice_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,9 +159,13 @@ pub struct ReferenceAsset {
 #[serde(rename_all = "camelCase")]
 pub struct RecordingAttempt {
   pub id: String,
+  pub project_id: String,
   pub name: String,
   pub file_name: String,
   pub relative_path: String,
+  pub reference_id: Option<String>,
+  pub notes: Option<String>,
+  pub created_at: String,
   pub measure_start: Option<i64>,
   pub measure_end: Option<i64>,
   pub recorded_at: String,
@@ -165,10 +200,59 @@ pub struct LoopRange {
 #[serde(rename_all = "camelCase")]
 pub struct Bookmark {
   pub id: String,
-  pub name: String,
-  pub measure_number: i64,
+  pub measure_start: i64,
+  pub measure_end: i64,
+  pub label: String,
+  pub note_text: Option<String>,
+  pub color: Option<String>,
+  pub status: String,
   pub created_at: String,
   pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PracticeSession {
+  pub id: String,
+  pub started_at: String,
+  pub ended_at: Option<String>,
+  pub duration_ms: Option<i64>,
+  pub created_at: String,
+  pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PracticeActivity {
+  pub id: String,
+  pub session_id: Option<String>,
+  pub kind: String,
+  pub title: String,
+  pub detail: Option<String>,
+  pub measure_start: Option<i64>,
+  pub measure_end: Option<i64>,
+  pub reference_id: Option<String>,
+  pub recording_id: Option<String>,
+  pub bookmark_id: Option<String>,
+  pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PracticeRangeStat {
+  pub measure_start: i64,
+  pub measure_end: i64,
+  pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PracticeStats {
+  pub today_ms: i64,
+  pub week_ms: i64,
+  pub recording_attempts: i64,
+  pub bookmark_count: i64,
+  pub most_practiced_ranges: Vec<PracticeRangeStat>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,5 +272,8 @@ pub struct ProjectDetail {
   pub markers: Vec<MeasureMarker>,
   pub loop_range: Option<LoopRange>,
   pub bookmarks: Vec<Bookmark>,
+  pub practice_sessions: Vec<PracticeSession>,
+  pub recent_activity: Vec<PracticeActivity>,
+  pub stats: PracticeStats,
   pub note: ProjectNote,
 }

@@ -1,6 +1,6 @@
 use crate::models::*;
 use anyhow::{anyhow, Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Datelike, Duration, Local, Utc};
 use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
@@ -9,7 +9,7 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Clone)]
 pub struct AppPaths {
@@ -56,6 +56,8 @@ pub fn init_library_db(workspace_root: &Path) -> Result<()> {
     .optional()?;
   if version.is_none() {
     conn.execute("INSERT INTO schema_version (version) VALUES (?1)", [SCHEMA_VERSION])?;
+  } else if version.unwrap_or(0) < SCHEMA_VERSION {
+    conn.execute("UPDATE schema_version SET version = ?1", [SCHEMA_VERSION])?;
   }
   conn.execute(
     r#"
@@ -67,11 +69,13 @@ pub fn init_library_db(workspace_root: &Path) -> Result<()> {
       updated_at TEXT NOT NULL,
       last_opened_at TEXT NOT NULL,
       active_reference_id TEXT,
-      active_recording_id TEXT
+      active_recording_id TEXT,
+      active_practice_session_id TEXT
     )
     "#,
     [],
   )?;
+  ensure_column(&conn, "projects", "active_practice_session_id", "TEXT")?;
   Ok(())
 }
 
@@ -107,6 +111,7 @@ pub fn init_project_db(project_root: &Path, project_id: &str, project_name: &str
       notes_updated_at TEXT,
       active_reference_id TEXT,
       active_recording_id TEXT,
+      active_practice_session_id TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
@@ -142,9 +147,13 @@ pub fn init_project_db(project_root: &Path, project_id: &str, project_name: &str
     r#"
     CREATE TABLE IF NOT EXISTS recordings (
       id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
       name TEXT NOT NULL,
       file_name TEXT NOT NULL,
       relative_path TEXT NOT NULL,
+      reference_id TEXT,
+      notes TEXT,
+      created_at TEXT NOT NULL,
       measure_start INTEGER,
       measure_end INTEGER,
       recorded_at TEXT NOT NULL,
@@ -187,18 +196,155 @@ pub fn init_project_db(project_root: &Path, project_id: &str, project_name: &str
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       measure_number INTEGER NOT NULL,
+      measure_start INTEGER,
+      measure_end INTEGER,
+      label TEXT,
+      note_text TEXT,
+      color TEXT,
+      status TEXT NOT NULL DEFAULT 'Needs Work',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
     "#,
     [],
   )?;
+  conn.execute(
+    r#"
+    CREATE TABLE IF NOT EXISTS practice_sessions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      ended_at TEXT,
+      duration_ms INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+    "#,
+    [],
+  )?;
+  conn.execute(
+    r#"
+    CREATE TABLE IF NOT EXISTS practice_activity (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      session_id TEXT,
+      kind TEXT NOT NULL,
+      title TEXT NOT NULL,
+      detail TEXT,
+      measure_start INTEGER,
+      measure_end INTEGER,
+      reference_id TEXT,
+      recording_id TEXT,
+      bookmark_id TEXT,
+      created_at TEXT NOT NULL
+    )
+    "#,
+    [],
+  )?;
+
+  migrate_project_db(&conn, version)?;
 
   conn.execute(
     r#"INSERT OR IGNORE INTO project (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)"#,
     params![project_id, project_name, now(), now()],
   )?;
   Ok(())
+}
+
+fn migrate_project_db(conn: &Connection, version: Option<i64>) -> Result<()> {
+  if version.unwrap_or(0) >= SCHEMA_VERSION {
+    return Ok(());
+  }
+
+  ensure_column(conn, "project", "active_practice_session_id", "TEXT")?;
+  ensure_column(conn, "recordings", "project_id", "TEXT")?;
+  ensure_column(conn, "bookmarks", "measure_start", "INTEGER")?;
+  ensure_column(conn, "bookmarks", "measure_end", "INTEGER")?;
+  ensure_column(conn, "bookmarks", "label", "TEXT")?;
+  ensure_column(conn, "bookmarks", "note_text", "TEXT")?;
+  ensure_column(conn, "bookmarks", "color", "TEXT")?;
+  ensure_column(conn, "bookmarks", "status", "TEXT NOT NULL DEFAULT 'Needs Work'")?;
+  ensure_column(conn, "recordings", "reference_id", "TEXT")?;
+  ensure_column(conn, "recordings", "notes", "TEXT")?;
+  ensure_column(conn, "recordings", "created_at", "TEXT")?;
+
+  conn.execute(
+    r#"
+    UPDATE bookmarks
+    SET measure_start = COALESCE(measure_start, measure_number),
+        measure_end = COALESCE(measure_end, measure_number),
+        label = COALESCE(label, name),
+        status = COALESCE(NULLIF(status, ''), 'Needs Work')
+    "#,
+    [],
+  )?;
+  let project_id: String = conn.query_row("SELECT id FROM project LIMIT 1", [], |row| row.get(0))?;
+  conn.execute(
+    r#"
+    UPDATE recordings
+    SET project_id = COALESCE(NULLIF(project_id, ''), ?1),
+        created_at = COALESCE(created_at, recorded_at)
+    "#,
+    params![project_id],
+  )?;
+
+  conn.execute(
+    r#"
+    CREATE TABLE IF NOT EXISTS practice_sessions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      ended_at TEXT,
+      duration_ms INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+    "#,
+    [],
+  )?;
+  conn.execute(
+    r#"
+    CREATE TABLE IF NOT EXISTS practice_activity (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      session_id TEXT,
+      kind TEXT NOT NULL,
+      title TEXT NOT NULL,
+      detail TEXT,
+      measure_start INTEGER,
+      measure_end INTEGER,
+      reference_id TEXT,
+      recording_id TEXT,
+      bookmark_id TEXT,
+      created_at TEXT NOT NULL
+    )
+    "#,
+    [],
+  )?;
+  conn.execute("UPDATE schema_version SET version = ?1", [SCHEMA_VERSION])?;
+  Ok(())
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
+  if table_has_column(conn, table, column)? {
+    return Ok(());
+  }
+  conn.execute(
+    &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+    [],
+  )?;
+  Ok(())
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+  let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+  let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+  for row in rows {
+    if row? == column {
+      return Ok(true);
+    }
+  }
+  Ok(false)
 }
 
 pub fn open_project_conn(project_root: &Path) -> Result<Connection> {
@@ -231,6 +377,7 @@ pub fn create_project_row(workspace_root: &Path, project_id: &str, name: &str, r
     last_opened_at: timestamp,
     active_reference_id: None,
     active_recording_id: None,
+    active_practice_session_id: None,
   })
 }
 
@@ -238,7 +385,7 @@ pub fn list_projects(workspace_root: &Path) -> Result<Vec<ProjectSummary>> {
   let conn = open_library_conn(workspace_root)?;
   let mut stmt = conn.prepare(
     r#"
-    SELECT id, name, root_path, created_at, updated_at, last_opened_at, active_reference_id, active_recording_id
+    SELECT id, name, root_path, created_at, updated_at, last_opened_at, active_reference_id, active_recording_id, active_practice_session_id
     FROM projects
     ORDER BY last_opened_at DESC, updated_at DESC
     "#,
@@ -253,6 +400,7 @@ pub fn list_projects(workspace_root: &Path) -> Result<Vec<ProjectSummary>> {
       last_opened_at: row.get(5)?,
       active_reference_id: row.get(6)?,
       active_recording_id: row.get(7)?,
+      active_practice_session_id: row.get(8)?,
     })
   })?;
   let mut projects = Vec::new();
@@ -266,7 +414,7 @@ pub fn load_project_summary(workspace_root: &Path, project_id: &str) -> Result<(
   let conn = open_library_conn(workspace_root)?;
   let summary = conn.query_row(
     r#"
-    SELECT id, name, root_path, created_at, updated_at, last_opened_at, active_reference_id, active_recording_id
+    SELECT id, name, root_path, created_at, updated_at, last_opened_at, active_reference_id, active_recording_id, active_practice_session_id
     FROM projects
     WHERE id = ?1
     "#,
@@ -281,6 +429,7 @@ pub fn load_project_summary(workspace_root: &Path, project_id: &str) -> Result<(
         last_opened_at: row.get(5)?,
         active_reference_id: row.get(6)?,
         active_recording_id: row.get(7)?,
+        active_practice_session_id: row.get(8)?,
       })
     },
   )?;
@@ -294,12 +443,13 @@ pub fn update_library_project(workspace_root: &Path, project: &ProjectSummary) -
     r#"
     UPDATE projects
     SET name = ?2,
-        root_path = ?3,
-        created_at = ?4,
-        updated_at = ?5,
-        last_opened_at = ?6,
-        active_reference_id = ?7,
-        active_recording_id = ?8
+       root_path = ?3,
+       created_at = ?4,
+       updated_at = ?5,
+       last_opened_at = ?6,
+       active_reference_id = ?7,
+        active_recording_id = ?8,
+        active_practice_session_id = ?9
     WHERE id = ?1
     "#,
     params![
@@ -310,7 +460,8 @@ pub fn update_library_project(workspace_root: &Path, project: &ProjectSummary) -
       project.updated_at,
       project.last_opened_at,
       project.active_reference_id,
-      project.active_recording_id
+      project.active_recording_id,
+      project.active_practice_session_id
     ],
   )?;
   Ok(())
@@ -326,7 +477,7 @@ pub fn load_project_detail(project_root: &Path) -> Result<ProjectDetail> {
   let conn = open_project_conn(project_root)?;
   let project = conn.query_row(
     r#"
-    SELECT id, name, notes, notes_updated_at, active_reference_id, active_recording_id, created_at, updated_at
+    SELECT id, name, notes, notes_updated_at, active_reference_id, active_recording_id, active_practice_session_id, created_at, updated_at
     FROM project
     LIMIT 1
     "#,
@@ -339,8 +490,9 @@ pub fn load_project_detail(project_root: &Path) -> Result<ProjectDetail> {
         row.get::<_, Option<String>>(3)?,
         row.get::<_, Option<String>>(4)?,
         row.get::<_, Option<String>>(5)?,
-        row.get::<_, String>(6)?,
+        row.get::<_, Option<String>>(6)?,
         row.get::<_, String>(7)?,
+        row.get::<_, String>(8)?,
       ))
     },
   )?;
@@ -349,11 +501,12 @@ pub fn load_project_detail(project_root: &Path) -> Result<ProjectDetail> {
     id: project.0.clone(),
     name: project.1.clone(),
     root_path: project_root.to_string_lossy().to_string(),
-    created_at: project.6.clone(),
-    updated_at: project.7.clone(),
-    last_opened_at: project.7.clone(),
+    created_at: project.7.clone(),
+    updated_at: project.8.clone(),
+    last_opened_at: project.8.clone(),
     active_reference_id: project.4.clone(),
     active_recording_id: project.5.clone(),
+    active_practice_session_id: project.6.clone(),
   };
 
   let score = load_score(&conn, project_root)?;
@@ -362,6 +515,9 @@ pub fn load_project_detail(project_root: &Path) -> Result<ProjectDetail> {
   let markers = load_markers(&conn)?;
   let loop_range = load_active_loop_range(&conn)?;
   let bookmarks = load_bookmarks(&conn)?;
+  let practice_sessions = load_practice_sessions(&conn)?;
+  let recent_activity = load_recent_activity(&conn)?;
+  let stats = load_practice_stats(&conn)?;
   let note = ProjectNote {
     text: project.2.clone(),
     updated_at: project.3.clone(),
@@ -375,6 +531,9 @@ pub fn load_project_detail(project_root: &Path) -> Result<ProjectDetail> {
     markers,
     loop_range,
     bookmarks,
+    practice_sessions,
+    recent_activity,
+    stats,
     note,
   })
 }
@@ -447,21 +606,25 @@ fn load_references(conn: &Connection) -> Result<Vec<ReferenceAsset>> {
 fn load_recordings(conn: &Connection) -> Result<Vec<RecordingAttempt>> {
   let mut stmt = conn.prepare(
     r#"
-    SELECT id, name, file_name, relative_path, measure_start, measure_end, recorded_at, duration_ms
+    SELECT id, project_id, name, file_name, relative_path, reference_id, notes, created_at, measure_start, measure_end, recorded_at, duration_ms
     FROM recordings
-    ORDER BY recorded_at DESC
+    ORDER BY COALESCE(created_at, recorded_at) DESC, recorded_at DESC
     "#,
   )?;
   let rows = stmt.query_map([], |row| {
     Ok(RecordingAttempt {
       id: row.get(0)?,
-      name: row.get(1)?,
-      file_name: row.get(2)?,
-      relative_path: row.get(3)?,
-      measure_start: row.get(4)?,
-      measure_end: row.get(5)?,
-      recorded_at: row.get(6)?,
-      duration_ms: row.get(7)?,
+      project_id: row.get(1)?,
+      name: row.get(2)?,
+      file_name: row.get(3)?,
+      relative_path: row.get(4)?,
+      reference_id: row.get(5)?,
+      notes: row.get(6)?,
+      created_at: row.get(7)?,
+      measure_start: row.get(8)?,
+      measure_end: row.get(9)?,
+      recorded_at: row.get(10)?,
+      duration_ms: row.get(11)?,
     })
   })?;
   let mut result = Vec::new();
@@ -527,18 +690,31 @@ fn load_active_loop_range(conn: &Connection) -> Result<Option<LoopRange>> {
 fn load_bookmarks(conn: &Connection) -> Result<Vec<Bookmark>> {
   let mut stmt = conn.prepare(
     r#"
-    SELECT id, name, measure_number, created_at, updated_at
+    SELECT id, measure_number, measure_start, measure_end, label, note_text, color, status, created_at, updated_at
     FROM bookmarks
-    ORDER BY measure_number ASC, updated_at DESC
+    ORDER BY COALESCE(measure_start, measure_number) ASC, updated_at DESC
     "#,
   )?;
   let rows = stmt.query_map([], |row| {
+    let measure_number: i64 = row.get(1)?;
+    let measure_start = row.get::<_, Option<i64>>(2)?.unwrap_or(measure_number);
+    let measure_end = row.get::<_, Option<i64>>(3)?.unwrap_or(measure_start);
     Ok(Bookmark {
       id: row.get(0)?,
-      name: row.get(1)?,
-      measure_number: row.get(2)?,
-      created_at: row.get(3)?,
-      updated_at: row.get(4)?,
+      measure_start,
+      measure_end,
+      label: row
+        .get::<_, Option<String>>(4)?
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| String::from("Bookmark")),
+      note_text: row.get(5)?,
+      color: row.get(6)?,
+      status: row
+        .get::<_, Option<String>>(7)?
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| String::from("Needs Work")),
+      created_at: row.get(8)?,
+      updated_at: row.get(9)?,
     })
   })?;
   let mut result = Vec::new();
@@ -546,6 +722,140 @@ fn load_bookmarks(conn: &Connection) -> Result<Vec<Bookmark>> {
     result.push(row?);
   }
   Ok(result)
+}
+
+fn load_practice_sessions(conn: &Connection) -> Result<Vec<PracticeSession>> {
+  let mut stmt = conn.prepare(
+    r#"
+    SELECT id, started_at, ended_at, duration_ms, created_at, updated_at
+    FROM practice_sessions
+    ORDER BY started_at DESC
+    "#,
+  )?;
+  let rows = stmt.query_map([], |row| {
+    Ok(PracticeSession {
+      id: row.get(0)?,
+      started_at: row.get(1)?,
+      ended_at: row.get(2)?,
+      duration_ms: row.get(3)?,
+      created_at: row.get(4)?,
+      updated_at: row.get(5)?,
+    })
+  })?;
+  let mut result = Vec::new();
+  for row in rows {
+    result.push(row?);
+  }
+  Ok(result)
+}
+
+fn load_recent_activity(conn: &Connection) -> Result<Vec<PracticeActivity>> {
+  let mut stmt = conn.prepare(
+    r#"
+    SELECT id, session_id, kind, title, detail, measure_start, measure_end, reference_id, recording_id, bookmark_id, created_at
+    FROM practice_activity
+    ORDER BY created_at DESC
+    LIMIT 24
+    "#,
+  )?;
+  let rows = stmt.query_map([], |row| {
+    Ok(PracticeActivity {
+      id: row.get(0)?,
+      session_id: row.get(1)?,
+      kind: row.get(2)?,
+      title: row.get(3)?,
+      detail: row.get(4)?,
+      measure_start: row.get(5)?,
+      measure_end: row.get(6)?,
+      reference_id: row.get(7)?,
+      recording_id: row.get(8)?,
+      bookmark_id: row.get(9)?,
+      created_at: row.get(10)?,
+    })
+  })?;
+  let mut result = Vec::new();
+  for row in rows {
+    result.push(row?);
+  }
+  Ok(result)
+}
+
+fn load_practice_stats(conn: &Connection) -> Result<PracticeStats> {
+  let now_local = Local::now();
+  let today_start = now_local.date_naive().and_hms_opt(0, 0, 0).unwrap();
+  let week_start = today_start - Duration::days(i64::from(now_local.weekday().num_days_from_monday()));
+  let sessions = load_practice_sessions(conn)?;
+
+  let mut today_ms = 0_i64;
+  let mut week_ms = 0_i64;
+  let mut range_counts: std::collections::HashMap<(i64, i64), i64> = std::collections::HashMap::new();
+
+  for session in &sessions {
+    let started_at = parse_datetime(&session.started_at)?;
+    let ended_at = session
+      .ended_at
+      .as_ref()
+      .and_then(|value| parse_datetime(value).ok())
+      .unwrap_or_else(Utc::now);
+    let duration_ms = session.duration_ms.unwrap_or_else(|| (ended_at - started_at).num_milliseconds().max(0));
+    let started_local = started_at.with_timezone(&Local);
+    if started_local.naive_local() >= today_start {
+      today_ms += duration_ms;
+    }
+    if started_local.naive_local() >= week_start {
+      week_ms += duration_ms;
+    }
+  }
+
+  let recording_attempts: i64 = conn.query_row("SELECT COUNT(*) FROM recordings", [], |row| row.get(0))?;
+  let bookmark_count: i64 = conn.query_row("SELECT COUNT(*) FROM bookmarks", [], |row| row.get(0))?;
+
+  for bookmark in load_bookmarks(conn)? {
+    *range_counts.entry((bookmark.measure_start, bookmark.measure_end)).or_insert(0) += 1;
+  }
+
+  let mut recording_stmt = conn.prepare(
+    r#"
+    SELECT measure_start, measure_end
+    FROM recordings
+    WHERE measure_start IS NOT NULL AND measure_end IS NOT NULL
+    "#,
+  )?;
+  let recording_ranges = recording_stmt.query_map([], |row| {
+    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+  })?;
+  for range in recording_ranges {
+    let (measure_start, measure_end) = range?;
+    *range_counts.entry((measure_start, measure_end)).or_insert(0) += 1;
+  }
+
+  let mut most_practiced_ranges: Vec<PracticeRangeStat> = range_counts
+    .into_iter()
+    .map(|((measure_start, measure_end), count)| PracticeRangeStat {
+      measure_start,
+      measure_end,
+      count,
+    })
+    .collect();
+  most_practiced_ranges.sort_by(|left, right| {
+    right
+      .count
+      .cmp(&left.count)
+      .then_with(|| left.measure_start.cmp(&right.measure_start))
+  });
+  most_practiced_ranges.truncate(5);
+
+  Ok(PracticeStats {
+    today_ms,
+    week_ms,
+    recording_attempts,
+    bookmark_count,
+    most_practiced_ranges,
+  })
+}
+
+fn parse_datetime(value: &str) -> Result<DateTime<Utc>> {
+  Ok(DateTime::parse_from_rfc3339(value)?.with_timezone(&Utc))
 }
 
 pub fn insert_score(project_root: &Path, file_name: &str, relative_path: &str, measure_count: i64) -> Result<()> {
@@ -584,18 +894,289 @@ pub fn insert_recording(project_root: &Path, recording: &RecordingAttempt) -> Re
   let conn = open_project_conn(project_root)?;
   conn.execute(
     r#"
-    INSERT INTO recordings (id, name, file_name, relative_path, measure_start, measure_end, recorded_at, duration_ms)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+    INSERT INTO recordings (
+      id, project_id, name, file_name, relative_path, reference_id, notes, created_at,
+      measure_start, measure_end, recorded_at, duration_ms
+    )
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
     "#,
     params![
       recording.id,
+      recording.project_id,
       recording.name,
       recording.file_name,
       recording.relative_path,
+      recording.reference_id,
+      recording.notes,
+      recording.created_at,
       recording.measure_start,
       recording.measure_end,
       recording.recorded_at,
       recording.duration_ms,
+    ],
+  )?;
+  Ok(())
+}
+
+pub fn load_recording(conn: &Connection, recording_id: &str) -> Result<Option<RecordingAttempt>> {
+  conn
+    .query_row(
+      r#"
+      SELECT id, project_id, name, file_name, relative_path, reference_id, notes, created_at, measure_start, measure_end, recorded_at, duration_ms
+      FROM recordings
+      WHERE id = ?1
+      "#,
+      [recording_id],
+      |row| {
+        Ok(RecordingAttempt {
+          id: row.get(0)?,
+          project_id: row.get(1)?,
+          name: row.get(2)?,
+          file_name: row.get(3)?,
+          relative_path: row.get(4)?,
+          reference_id: row.get(5)?,
+          notes: row.get(6)?,
+          created_at: row.get(7)?,
+          measure_start: row.get(8)?,
+          measure_end: row.get(9)?,
+          recorded_at: row.get(10)?,
+          duration_ms: row.get(11)?,
+        })
+      },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn update_recording(project_root: &Path, recording: &RecordingAttempt) -> Result<()> {
+  let conn = open_project_conn(project_root)?;
+  conn.execute(
+    r#"
+    UPDATE recordings
+    SET name = ?2,
+        reference_id = ?3,
+        notes = ?4,
+        measure_start = ?5,
+        measure_end = ?6
+    WHERE id = ?1
+    "#,
+    params![
+      recording.id,
+      recording.name,
+      recording.reference_id,
+      recording.notes,
+      recording.measure_start,
+      recording.measure_end,
+    ],
+  )?;
+  Ok(())
+}
+
+pub fn delete_recording(project_root: &Path, recording_id: &str) -> Result<()> {
+  let conn = open_project_conn(project_root)?;
+  conn.execute("DELETE FROM recordings WHERE id = ?1", [recording_id])?;
+  Ok(())
+}
+
+pub fn start_practice_session(project_root: &Path, project_id: &str) -> Result<PracticeSession> {
+  let conn = open_project_conn(project_root)?;
+  let current_active: Option<String> = conn.query_row(
+    "SELECT active_practice_session_id FROM project LIMIT 1",
+    [],
+    |row| row.get(0),
+  )?;
+  if let Some(session_id) = current_active {
+    let session = conn
+      .query_row(
+      r#"
+      SELECT id, started_at, ended_at, duration_ms, created_at, updated_at
+      FROM practice_sessions
+      WHERE id = ?1
+      "#,
+      [session_id],
+      |row| {
+        Ok(PracticeSession {
+          id: row.get(0)?,
+          started_at: row.get(1)?,
+          ended_at: row.get(2)?,
+          duration_ms: row.get(3)?,
+          created_at: row.get(4)?,
+          updated_at: row.get(5)?,
+        })
+      },
+      )
+      .optional()?;
+    if let Some(session) = session {
+      if session.ended_at.is_none() {
+        return Ok(session);
+      }
+    }
+    conn.execute("UPDATE project SET active_practice_session_id = NULL, updated_at = ?1", [now()])?;
+  }
+
+  let timestamp = now();
+  let session = PracticeSession {
+    id: generate_id(),
+    started_at: timestamp.clone(),
+    ended_at: None,
+    duration_ms: None,
+    created_at: timestamp.clone(),
+    updated_at: timestamp.clone(),
+  };
+  conn.execute(
+    r#"
+    INSERT INTO practice_sessions (id, project_id, started_at, ended_at, duration_ms, created_at, updated_at)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+    "#,
+    params![
+      session.id,
+      project_id,
+      session.started_at,
+      session.ended_at,
+      session.duration_ms,
+      session.created_at,
+      session.updated_at,
+    ],
+  )?;
+  conn.execute(
+    "UPDATE project SET active_practice_session_id = ?1, updated_at = ?2",
+    params![session.id, now()],
+  )?;
+  let _ = log_practice_activity(
+    project_root,
+    project_id,
+    "session_start",
+    "Started practice session",
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+  );
+  Ok(session)
+}
+
+pub fn end_practice_session(project_root: &Path, project_id: &str) -> Result<Option<PracticeSession>> {
+  let conn = open_project_conn(project_root)?;
+  let active_session_id: Option<String> = conn.query_row(
+    "SELECT active_practice_session_id FROM project LIMIT 1",
+    [],
+    |row| row.get(0),
+  )?;
+  let Some(session_id) = active_session_id else {
+    return Ok(None);
+  };
+
+  let session = conn
+    .query_row(
+    r#"
+    SELECT id, started_at, ended_at, duration_ms, created_at, updated_at
+    FROM practice_sessions
+    WHERE id = ?1
+    "#,
+    [session_id.clone()],
+    |row| {
+      Ok(PracticeSession {
+        id: row.get(0)?,
+        started_at: row.get(1)?,
+        ended_at: row.get(2)?,
+        duration_ms: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+        })
+      },
+    )
+    .optional()?;
+  let Some(session) = session else {
+    conn.execute(
+      "UPDATE project SET active_practice_session_id = NULL, updated_at = ?1",
+      [now()],
+    )?;
+    return Ok(None);
+  };
+  if session.ended_at.is_some() {
+    conn.execute(
+      "UPDATE project SET active_practice_session_id = NULL, updated_at = ?1",
+      [now()],
+    )?;
+    return Ok(Some(session));
+  }
+
+  let ended_at = now();
+  let started_at = parse_datetime(&session.started_at)?;
+  let ended_at_dt = parse_datetime(&ended_at)?;
+  let duration_ms = (ended_at_dt - started_at).num_milliseconds().max(0);
+  conn.execute(
+    r#"
+    UPDATE practice_sessions
+    SET ended_at = ?2,
+        duration_ms = ?3,
+        updated_at = ?2
+    WHERE id = ?1
+    "#,
+    params![session.id, ended_at, duration_ms],
+  )?;
+  let _ = log_practice_activity(
+    project_root,
+    project_id,
+    "session_end",
+    "Completed practice session",
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+  );
+  conn.execute(
+    "UPDATE project SET active_practice_session_id = NULL, updated_at = ?1",
+    [now()],
+  )?;
+  Ok(Some(PracticeSession {
+    ended_at: Some(ended_at),
+    duration_ms: Some(duration_ms),
+    ..session
+  }))
+}
+
+pub fn log_practice_activity(
+  project_root: &Path,
+  project_id: &str,
+  kind: &str,
+  title: &str,
+  detail: Option<&str>,
+  measure_start: Option<i64>,
+  measure_end: Option<i64>,
+  reference_id: Option<&str>,
+  recording_id: Option<&str>,
+  bookmark_id: Option<&str>,
+) -> Result<()> {
+  let conn = open_project_conn(project_root)?;
+  let session_id: Option<String> = conn
+    .query_row("SELECT active_practice_session_id FROM project LIMIT 1", [], |row| row.get(0))
+    .optional()?;
+  conn.execute(
+    r#"
+    INSERT INTO practice_activity (
+      id, project_id, session_id, kind, title, detail, measure_start, measure_end,
+      reference_id, recording_id, bookmark_id, created_at
+    )
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+    "#,
+    params![
+      generate_id(),
+      project_id,
+      session_id,
+      kind,
+      title,
+      detail,
+      measure_start,
+      measure_end,
+      reference_id,
+      recording_id,
+      bookmark_id,
+      now(),
     ],
   )?;
   Ok(())
@@ -660,17 +1241,27 @@ pub fn upsert_bookmark(project_root: &Path, bookmark: &Bookmark) -> Result<()> {
   let conn = open_project_conn(project_root)?;
   conn.execute(
     r#"
-    INSERT INTO bookmarks (id, name, measure_number, created_at, updated_at)
-    VALUES (?1, ?2, ?3, ?4, ?5)
+    INSERT INTO bookmarks (id, measure_number, measure_start, measure_end, label, note_text, color, status, created_at, updated_at)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
     ON CONFLICT(id) DO UPDATE SET
-      name = excluded.name,
       measure_number = excluded.measure_number,
+      measure_start = excluded.measure_start,
+      measure_end = excluded.measure_end,
+      label = excluded.label,
+      note_text = excluded.note_text,
+      color = excluded.color,
+      status = excluded.status,
       updated_at = excluded.updated_at
     "#,
     params![
       bookmark.id,
-      bookmark.name,
-      bookmark.measure_number,
+      bookmark.measure_start,
+      bookmark.measure_start,
+      bookmark.measure_end,
+      bookmark.label,
+      bookmark.note_text,
+      bookmark.color,
+      bookmark.status,
       bookmark.created_at,
       bookmark.updated_at,
     ],

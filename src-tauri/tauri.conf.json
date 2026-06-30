@@ -21,8 +21,7 @@
     "bundle": {
       "active": true,
       "identifier": "com.bun781.reference-practice",
-      "targets": ["all"]
+      "targets": "all"
     }
   }
 }
-

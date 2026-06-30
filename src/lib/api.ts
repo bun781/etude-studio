@@ -1,14 +1,20 @@
 import { invoke } from "@tauri-apps/api/tauri";
 import { open } from "@tauri-apps/api/dialog";
+import { open as openPath } from "@tauri-apps/api/shell";
 import { convertFileSrc } from "@tauri-apps/api/tauri";
-import { join } from "@tauri-apps/api/path";
+import { dirname, join } from "@tauri-apps/api/path";
 import type {
   Bookmark,
+  DuplicateRecordingInput,
+  EndPracticeSessionInput,
   CreateProjectInput,
   DeleteProjectInput,
   ImportAssetInput,
   LoopRange,
   MeasureMarker,
+  PracticeActivity,
+  PracticeSession,
+  PracticeStats,
   ProjectDetail,
   ProjectSummary,
   RenameProjectInput,
@@ -16,6 +22,7 @@ import type {
   SaveLoopRangeInput,
   SaveMarkerInput,
   SaveRecordingInput,
+  UpdateRecordingInput,
 } from "./types";
 
 export async function listProjects(): Promise<ProjectSummary[]> {
@@ -90,6 +97,22 @@ export async function setActiveRecording(projectId: string, recordingId: string 
   return invoke("set_active_recording", { projectId, recordingId });
 }
 
+export async function updateRecording(input: UpdateRecordingInput): Promise<ProjectDetail> {
+  return invoke("update_recording", input);
+}
+
+export async function deleteRecording(projectId: string, recordingId: string): Promise<ProjectDetail> {
+  return invoke("delete_recording", { projectId, recordingId });
+}
+
+export async function duplicateRecording(input: DuplicateRecordingInput): Promise<ProjectDetail> {
+  return invoke("duplicate_recording", input);
+}
+
+export async function endPracticeSession(input: EndPracticeSessionInput): Promise<ProjectDetail> {
+  return invoke("end_practice_session", input);
+}
+
 export async function openScoreFile(): Promise<string | null> {
   return open({
     multiple: false,
@@ -114,8 +137,16 @@ export async function openFolder(): Promise<string | null> {
   return open({ directory: true, multiple: false }) as Promise<string | null>;
 }
 
+export async function openPathInFinder(path: string): Promise<void> {
+  await openPath(path);
+}
+
 export async function joinPath(...segments: string[]): Promise<string> {
   return join(...segments);
+}
+
+export async function dirnamePath(path: string): Promise<string> {
+  return dirname(path);
 }
 
 export function toFileSrc(path: string): string {
@@ -133,9 +164,11 @@ export async function saveBinaryFile(path: string, data: ArrayBuffer): Promise<v
 
 export type {
   Bookmark,
+  PracticeActivity,
+  PracticeSession,
+  PracticeStats,
   LoopRange,
   MeasureMarker,
   ProjectDetail,
   ProjectSummary,
 };
-
