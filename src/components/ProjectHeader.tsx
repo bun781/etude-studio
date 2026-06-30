@@ -6,12 +6,6 @@ type Props = {
   setProjectNameDraft: (value: string) => void;
   onCreateProject: () => void;
   onOpenProject: () => void;
-  onRenameProject: () => void;
-  onDeleteProject: () => void;
-  onImportScore: () => void;
-  onImportReference: () => void;
-  onToggleRecording: () => void;
-  isRecording: boolean;
 };
 
 export function ProjectHeader({
@@ -20,18 +14,12 @@ export function ProjectHeader({
   setProjectNameDraft,
   onCreateProject,
   onOpenProject,
-  onRenameProject,
-  onDeleteProject,
-  onImportScore,
-  onImportReference,
-  onToggleRecording,
-  isRecording,
 }: Props) {
   return (
     <header className="topbar">
       <div className="topbar__primary">
         <div>
-          <p className="eyebrow">Reference Practice</p>
+          <p className="eyebrow">Current piece</p>
           <h1>{project?.name ?? "No project open"}</h1>
         </div>
         {project ? (
@@ -44,27 +32,13 @@ export function ProjectHeader({
         <input
           aria-label="Project name"
           className="text-input text-input--wide"
-          placeholder="Project name"
+          data-tour-id="project-name"
+          placeholder="New project name"
           value={projectNameDraft}
           onChange={(event) => setProjectNameDraft(event.target.value)}
         />
-        <button className="primary-btn" onClick={onCreateProject}>New</button>
-        <button className="secondary-btn" onClick={onOpenProject}>Open</button>
-        <button className="secondary-btn" onClick={onRenameProject} disabled={!project}>
-          Rename
-        </button>
-        <button className="danger-btn" onClick={onDeleteProject} disabled={!project}>
-          Delete
-        </button>
-        <button className="secondary-btn" onClick={onImportScore} disabled={!project}>
-          Import Score
-        </button>
-        <button className="secondary-btn" onClick={onImportReference} disabled={!project}>
-          Import Reference
-        </button>
-        <button className="secondary-btn" onClick={onToggleRecording} disabled={!project}>
-          {isRecording ? "Stop Recording" : "Record"}
-        </button>
+        <button className="primary-btn" data-tour-id="new-project" onClick={onCreateProject}>New project</button>
+        <button className="secondary-btn" data-tour-id="open-selected" onClick={onOpenProject}>Open selected</button>
       </div>
     </header>
   );

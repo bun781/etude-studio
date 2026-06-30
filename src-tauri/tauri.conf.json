@@ -10,6 +10,22 @@
     "version": "0.1.0"
   },
   "tauri": {
+    "allowlist": {
+      "dialog": {
+        "open": true
+      },
+      "fs": {
+        "writeFile": true,
+        "scope": ["$APPDATA/**"]
+      },
+      "path": {
+        "all": true
+      },
+      "protocol": {
+        "asset": true,
+        "assetScope": ["$APPDATA/**"]
+      }
+    },
     "windows": [
       {
         "title": "Reference Practice",

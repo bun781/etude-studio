@@ -1,7 +1,6 @@
 use crate::models::*;
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Datelike, Duration, Local, Utc};
-use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
   fs,
@@ -9,7 +8,7 @@ use std::{
 };
 use uuid::Uuid;
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 5;
 
 #[derive(Clone)]
 pub struct AppPaths {
@@ -133,6 +132,32 @@ pub fn init_project_db(project_root: &Path, project_id: &str, project_name: &str
   )?;
   conn.execute(
     r#"
+    CREATE TABLE IF NOT EXISTS practice_segments (
+      id TEXT PRIMARY KEY,
+      score_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      position INTEGER NOT NULL,
+      start_page INTEGER NOT NULL,
+      end_page INTEGER NOT NULL,
+      start_x REAL,
+      start_y REAL,
+      end_x REAL,
+      end_y REAL,
+      measure_start INTEGER,
+      measure_end INTEGER,
+      reference_id TEXT,
+      reference_start_ms INTEGER,
+      reference_end_ms INTEGER,
+      status TEXT,
+      notes TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+    "#,
+    [],
+  )?;
+  conn.execute(
+    r#"
     CREATE TABLE IF NOT EXISTS references_table (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -152,58 +177,11 @@ pub fn init_project_db(project_root: &Path, project_id: &str, project_name: &str
       file_name TEXT NOT NULL,
       relative_path TEXT NOT NULL,
       reference_id TEXT,
+      segment_id TEXT,
       notes TEXT,
       created_at TEXT NOT NULL,
-      measure_start INTEGER,
-      measure_end INTEGER,
       recorded_at TEXT NOT NULL,
       duration_ms INTEGER
-    )
-    "#,
-    [],
-  )?;
-  conn.execute(
-    r#"
-    CREATE TABLE IF NOT EXISTS markers (
-      id TEXT PRIMARY KEY,
-      measure_number INTEGER NOT NULL,
-      timestamp_ms INTEGER NOT NULL,
-      label TEXT,
-      note_text TEXT,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    )
-    "#,
-    [],
-  )?;
-  conn.execute(
-    r#"
-    CREATE TABLE IF NOT EXISTS loop_ranges (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      start_measure INTEGER NOT NULL,
-      end_measure INTEGER NOT NULL,
-      is_active INTEGER NOT NULL,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    )
-    "#,
-    [],
-  )?;
-  conn.execute(
-    r#"
-    CREATE TABLE IF NOT EXISTS bookmarks (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      measure_number INTEGER NOT NULL,
-      measure_start INTEGER,
-      measure_end INTEGER,
-      label TEXT,
-      note_text TEXT,
-      color TEXT,
-      status TEXT NOT NULL DEFAULT 'Needs Work',
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
     )
     "#,
     [],
@@ -231,18 +209,18 @@ pub fn init_project_db(project_root: &Path, project_id: &str, project_name: &str
       kind TEXT NOT NULL,
       title TEXT NOT NULL,
       detail TEXT,
-      measure_start INTEGER,
-      measure_end INTEGER,
+      segment_id TEXT,
       reference_id TEXT,
       recording_id TEXT,
-      bookmark_id TEXT,
       created_at TEXT NOT NULL
     )
     "#,
     [],
   )?;
 
-  migrate_project_db(&conn, version)?;
+  if version.is_some() {
+    migrate_project_db(&conn, version)?;
+  }
 
   conn.execute(
     r#"INSERT OR IGNORE INTO project (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)"#,
@@ -258,26 +236,11 @@ fn migrate_project_db(conn: &Connection, version: Option<i64>) -> Result<()> {
 
   ensure_column(conn, "project", "active_practice_session_id", "TEXT")?;
   ensure_column(conn, "recordings", "project_id", "TEXT")?;
-  ensure_column(conn, "bookmarks", "measure_start", "INTEGER")?;
-  ensure_column(conn, "bookmarks", "measure_end", "INTEGER")?;
-  ensure_column(conn, "bookmarks", "label", "TEXT")?;
-  ensure_column(conn, "bookmarks", "note_text", "TEXT")?;
-  ensure_column(conn, "bookmarks", "color", "TEXT")?;
-  ensure_column(conn, "bookmarks", "status", "TEXT NOT NULL DEFAULT 'Needs Work'")?;
   ensure_column(conn, "recordings", "reference_id", "TEXT")?;
+  ensure_column(conn, "recordings", "segment_id", "TEXT")?;
   ensure_column(conn, "recordings", "notes", "TEXT")?;
   ensure_column(conn, "recordings", "created_at", "TEXT")?;
 
-  conn.execute(
-    r#"
-    UPDATE bookmarks
-    SET measure_start = COALESCE(measure_start, measure_number),
-        measure_end = COALESCE(measure_end, measure_number),
-        label = COALESCE(label, name),
-        status = COALESCE(NULLIF(status, ''), 'Needs Work')
-    "#,
-    [],
-  )?;
   let project_id: String = conn.query_row("SELECT id FROM project LIMIT 1", [], |row| row.get(0))?;
   conn.execute(
     r#"
@@ -311,17 +274,43 @@ fn migrate_project_db(conn: &Connection, version: Option<i64>) -> Result<()> {
       kind TEXT NOT NULL,
       title TEXT NOT NULL,
       detail TEXT,
-      measure_start INTEGER,
-      measure_end INTEGER,
+      segment_id TEXT,
       reference_id TEXT,
       recording_id TEXT,
-      bookmark_id TEXT,
       created_at TEXT NOT NULL
     )
     "#,
     [],
   )?;
-  conn.execute("UPDATE schema_version SET version = ?1", [SCHEMA_VERSION])?;
+  ensure_column(conn, "practice_activity", "segment_id", "TEXT")?;
+  conn.execute(
+    r#"
+    CREATE TABLE IF NOT EXISTS practice_segments (
+      id TEXT PRIMARY KEY,
+      score_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      position INTEGER NOT NULL,
+      start_page INTEGER NOT NULL,
+      end_page INTEGER NOT NULL,
+      start_x REAL,
+      start_y REAL,
+      end_x REAL,
+      end_y REAL,
+      measure_start INTEGER,
+      measure_end INTEGER,
+      reference_id TEXT,
+      reference_start_ms INTEGER,
+      reference_end_ms INTEGER,
+      status TEXT,
+      notes TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+    "#,
+    [],
+  )?;
+  conn.execute("DELETE FROM schema_version", [])?;
+  conn.execute("INSERT INTO schema_version (version) VALUES (?1)", [SCHEMA_VERSION])?;
   Ok(())
 }
 
@@ -348,7 +337,16 @@ fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool
 }
 
 pub fn open_project_conn(project_root: &Path) -> Result<Connection> {
-  Ok(Connection::open(project_db_path(project_root))?)
+  let conn = Connection::open(project_db_path(project_root))?;
+  conn.execute(
+    "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)",
+    [],
+  )?;
+  let version: Option<i64> = conn
+    .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| row.get(0))
+    .optional()?;
+  migrate_project_db(&conn, version)?;
+  Ok(conn)
 }
 
 pub fn create_project_row(workspace_root: &Path, project_id: &str, name: &str, root_path: &Path) -> Result<ProjectSummary> {
@@ -483,7 +481,7 @@ pub fn load_project_detail(project_root: &Path) -> Result<ProjectDetail> {
     "#,
     [],
     |row| {
-      Ok(( 
+      Ok((
         row.get::<_, String>(0)?,
         row.get::<_, String>(1)?,
         row.get::<_, String>(2)?,
@@ -512,9 +510,6 @@ pub fn load_project_detail(project_root: &Path) -> Result<ProjectDetail> {
   let score = load_score(&conn, project_root)?;
   let references = load_references(&conn)?;
   let recordings = load_recordings(&conn)?;
-  let markers = load_markers(&conn)?;
-  let loop_range = load_active_loop_range(&conn)?;
-  let bookmarks = load_bookmarks(&conn)?;
   let practice_sessions = load_practice_sessions(&conn)?;
   let recent_activity = load_recent_activity(&conn)?;
   let stats = load_practice_stats(&conn)?;
@@ -528,9 +523,6 @@ pub fn load_project_detail(project_root: &Path) -> Result<ProjectDetail> {
     score,
     references,
     recordings,
-    markers,
-    loop_range,
-    bookmarks,
     practice_sessions,
     recent_activity,
     stats,
@@ -538,11 +530,11 @@ pub fn load_project_detail(project_root: &Path) -> Result<ProjectDetail> {
   })
 }
 
-fn load_score(conn: &Connection, project_root: &Path) -> Result<Option<ScoreAsset>> {
+fn load_score(conn: &Connection, _project_root: &Path) -> Result<Option<ScoreAsset>> {
   let score = conn
     .query_row(
       r#"
-      SELECT id, file_name, relative_path, format, imported_at, measure_count
+      SELECT id, file_name, relative_path, imported_at
       FROM scores
       ORDER BY imported_at DESC
       LIMIT 1
@@ -554,8 +546,6 @@ fn load_score(conn: &Connection, project_root: &Path) -> Result<Option<ScoreAsse
           row.get::<_, String>(1)?,
           row.get::<_, String>(2)?,
           row.get::<_, String>(3)?,
-          row.get::<_, String>(4)?,
-          row.get::<_, i64>(5)?,
         ))
       },
     )
@@ -565,18 +555,52 @@ fn load_score(conn: &Connection, project_root: &Path) -> Result<Option<ScoreAsse
     return Ok(None);
   };
 
-  let path = project_root.join(&score.2);
-  let preview_text = fs::read_to_string(path).unwrap_or_else(|_| String::from("Unable to read score preview."));
+  let segments = load_practice_segments(conn, &score.0)?;
 
   Ok(Some(ScoreAsset {
     id: score.0,
     file_name: score.1,
     relative_path: score.2,
-    format: score.3,
-    imported_at: score.4,
-    measure_count: score.5,
-    preview_text,
+    imported_at: score.3,
+    segments,
   }))
+}
+
+fn load_practice_segments(conn: &Connection, score_id: &str) -> Result<Vec<PracticeSegment>> {
+  let mut stmt = conn.prepare(
+    r#"
+    SELECT id, score_id, name, position, start_page, end_page, start_x, start_y, end_x, end_y,
+           measure_start, measure_end, reference_id, reference_start_ms, reference_end_ms,
+           status, notes, created_at, updated_at
+    FROM practice_segments
+    WHERE score_id = ?1
+    ORDER BY position ASC
+    "#,
+  )?;
+  let rows = stmt.query_map([score_id], |row| {
+    Ok(PracticeSegment {
+      id: row.get(0)?,
+      score_id: row.get(1)?,
+      name: row.get(2)?,
+      position: row.get(3)?,
+      start_page: row.get(4)?,
+      end_page: row.get(5)?,
+      start_x: row.get(6)?,
+      start_y: row.get(7)?,
+      end_x: row.get(8)?,
+      end_y: row.get(9)?,
+      measure_start: row.get(10)?,
+      measure_end: row.get(11)?,
+      reference_id: row.get(12)?,
+      reference_start_ms: row.get(13)?,
+      reference_end_ms: row.get(14)?,
+      status: row.get(15)?,
+      notes: row.get(16)?,
+      created_at: row.get(17)?,
+      updated_at: row.get(18)?,
+    })
+  })?;
+  rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 fn load_references(conn: &Connection) -> Result<Vec<ReferenceAsset>> {
@@ -606,7 +630,7 @@ fn load_references(conn: &Connection) -> Result<Vec<ReferenceAsset>> {
 fn load_recordings(conn: &Connection) -> Result<Vec<RecordingAttempt>> {
   let mut stmt = conn.prepare(
     r#"
-    SELECT id, project_id, name, file_name, relative_path, reference_id, notes, created_at, measure_start, measure_end, recorded_at, duration_ms
+    SELECT id, project_id, name, file_name, relative_path, reference_id, segment_id, notes, created_at, recorded_at, duration_ms
     FROM recordings
     ORDER BY COALESCE(created_at, recorded_at) DESC, recorded_at DESC
     "#,
@@ -619,102 +643,11 @@ fn load_recordings(conn: &Connection) -> Result<Vec<RecordingAttempt>> {
       file_name: row.get(3)?,
       relative_path: row.get(4)?,
       reference_id: row.get(5)?,
-      notes: row.get(6)?,
-      created_at: row.get(7)?,
-      measure_start: row.get(8)?,
-      measure_end: row.get(9)?,
-      recorded_at: row.get(10)?,
-      duration_ms: row.get(11)?,
-    })
-  })?;
-  let mut result = Vec::new();
-  for row in rows {
-    result.push(row?);
-  }
-  Ok(result)
-}
-
-fn load_markers(conn: &Connection) -> Result<Vec<MeasureMarker>> {
-  let mut stmt = conn.prepare(
-    r#"
-    SELECT id, measure_number, timestamp_ms, label, note_text, created_at, updated_at
-    FROM markers
-    ORDER BY measure_number ASC, timestamp_ms ASC
-    "#,
-  )?;
-  let rows = stmt.query_map([], |row| {
-    Ok(MeasureMarker {
-      id: row.get(0)?,
-      measure_number: row.get(1)?,
-      timestamp_ms: row.get(2)?,
-      label: row.get(3)?,
-      note_text: row.get(4)?,
-      created_at: row.get(5)?,
-      updated_at: row.get(6)?,
-    })
-  })?;
-  let mut result = Vec::new();
-  for row in rows {
-    result.push(row?);
-  }
-  Ok(result)
-}
-
-fn load_active_loop_range(conn: &Connection) -> Result<Option<LoopRange>> {
-  let row = conn
-    .query_row(
-      r#"
-      SELECT id, name, start_measure, end_measure, is_active, created_at, updated_at
-      FROM loop_ranges
-      WHERE is_active = 1
-      ORDER BY updated_at DESC
-      LIMIT 1
-      "#,
-      [],
-      |row| {
-        Ok(LoopRange {
-          id: row.get(0)?,
-          name: row.get(1)?,
-          start_measure: row.get(2)?,
-          end_measure: row.get(3)?,
-          is_active: row.get::<_, i64>(4)? == 1,
-          created_at: row.get(5)?,
-          updated_at: row.get(6)?,
-        })
-      },
-    )
-    .optional()?;
-  Ok(row)
-}
-
-fn load_bookmarks(conn: &Connection) -> Result<Vec<Bookmark>> {
-  let mut stmt = conn.prepare(
-    r#"
-    SELECT id, measure_number, measure_start, measure_end, label, note_text, color, status, created_at, updated_at
-    FROM bookmarks
-    ORDER BY COALESCE(measure_start, measure_number) ASC, updated_at DESC
-    "#,
-  )?;
-  let rows = stmt.query_map([], |row| {
-    let measure_number: i64 = row.get(1)?;
-    let measure_start = row.get::<_, Option<i64>>(2)?.unwrap_or(measure_number);
-    let measure_end = row.get::<_, Option<i64>>(3)?.unwrap_or(measure_start);
-    Ok(Bookmark {
-      id: row.get(0)?,
-      measure_start,
-      measure_end,
-      label: row
-        .get::<_, Option<String>>(4)?
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| String::from("Bookmark")),
-      note_text: row.get(5)?,
-      color: row.get(6)?,
-      status: row
-        .get::<_, Option<String>>(7)?
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| String::from("Needs Work")),
+      segment_id: row.get(6)?,
+      notes: row.get(7)?,
       created_at: row.get(8)?,
-      updated_at: row.get(9)?,
+      recorded_at: row.get(9)?,
+      duration_ms: row.get(10)?,
     })
   })?;
   let mut result = Vec::new();
@@ -752,7 +685,7 @@ fn load_practice_sessions(conn: &Connection) -> Result<Vec<PracticeSession>> {
 fn load_recent_activity(conn: &Connection) -> Result<Vec<PracticeActivity>> {
   let mut stmt = conn.prepare(
     r#"
-    SELECT id, session_id, kind, title, detail, measure_start, measure_end, reference_id, recording_id, bookmark_id, created_at
+    SELECT id, session_id, kind, title, detail, segment_id, reference_id, recording_id, created_at
     FROM practice_activity
     ORDER BY created_at DESC
     LIMIT 24
@@ -765,12 +698,10 @@ fn load_recent_activity(conn: &Connection) -> Result<Vec<PracticeActivity>> {
       kind: row.get(2)?,
       title: row.get(3)?,
       detail: row.get(4)?,
-      measure_start: row.get(5)?,
-      measure_end: row.get(6)?,
-      reference_id: row.get(7)?,
-      recording_id: row.get(8)?,
-      bookmark_id: row.get(9)?,
-      created_at: row.get(10)?,
+      segment_id: row.get(5)?,
+      reference_id: row.get(6)?,
+      recording_id: row.get(7)?,
+      created_at: row.get(8)?,
     })
   })?;
   let mut result = Vec::new();
@@ -788,7 +719,6 @@ fn load_practice_stats(conn: &Connection) -> Result<PracticeStats> {
 
   let mut today_ms = 0_i64;
   let mut week_ms = 0_i64;
-  let mut range_counts: std::collections::HashMap<(i64, i64), i64> = std::collections::HashMap::new();
 
   for session in &sessions {
     let started_at = parse_datetime(&session.started_at)?;
@@ -808,49 +738,37 @@ fn load_practice_stats(conn: &Connection) -> Result<PracticeStats> {
   }
 
   let recording_attempts: i64 = conn.query_row("SELECT COUNT(*) FROM recordings", [], |row| row.get(0))?;
-  let bookmark_count: i64 = conn.query_row("SELECT COUNT(*) FROM bookmarks", [], |row| row.get(0))?;
+  let segment_count: i64 = conn.query_row("SELECT COUNT(*) FROM practice_segments", [], |row| row.get(0))?;
 
-  for bookmark in load_bookmarks(conn)? {
-    *range_counts.entry((bookmark.measure_start, bookmark.measure_end)).or_insert(0) += 1;
-  }
-
-  let mut recording_stmt = conn.prepare(
+  let mut segment_stmt = conn.prepare(
     r#"
-    SELECT measure_start, measure_end
-    FROM recordings
-    WHERE measure_start IS NOT NULL AND measure_end IS NOT NULL
+    SELECT s.id, s.name, COUNT(r.id) AS recording_count
+    FROM practice_segments s
+    LEFT JOIN recordings r ON r.segment_id = s.id
+    GROUP BY s.id
+    HAVING recording_count > 0
+    ORDER BY recording_count DESC, s.position ASC
+    LIMIT 5
     "#,
   )?;
-  let recording_ranges = recording_stmt.query_map([], |row| {
-    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-  })?;
-  for range in recording_ranges {
-    let (measure_start, measure_end) = range?;
-    *range_counts.entry((measure_start, measure_end)).or_insert(0) += 1;
-  }
-
-  let mut most_practiced_ranges: Vec<PracticeRangeStat> = range_counts
-    .into_iter()
-    .map(|((measure_start, measure_end), count)| PracticeRangeStat {
-      measure_start,
-      measure_end,
-      count,
+  let rows = segment_stmt.query_map([], |row| {
+    Ok(PracticeSegmentStat {
+      segment_id: row.get(0)?,
+      segment_name: row.get(1)?,
+      count: row.get(2)?,
     })
-    .collect();
-  most_practiced_ranges.sort_by(|left, right| {
-    right
-      .count
-      .cmp(&left.count)
-      .then_with(|| left.measure_start.cmp(&right.measure_start))
-  });
-  most_practiced_ranges.truncate(5);
+  })?;
+  let mut most_practiced_segments = Vec::new();
+  for row in rows {
+    most_practiced_segments.push(row?);
+  }
 
   Ok(PracticeStats {
     today_ms,
     week_ms,
     recording_attempts,
-    bookmark_count,
-    most_practiced_ranges,
+    segment_count,
+    most_practiced_segments,
   })
 }
 
@@ -858,17 +776,148 @@ fn parse_datetime(value: &str) -> Result<DateTime<Utc>> {
   Ok(DateTime::parse_from_rfc3339(value)?.with_timezone(&Utc))
 }
 
-pub fn insert_score(project_root: &Path, file_name: &str, relative_path: &str, measure_count: i64) -> Result<()> {
+pub fn insert_score(project_root: &Path, file_name: &str, relative_path: &str) -> Result<()> {
   let conn = open_project_conn(project_root)?;
+  let score_id = Uuid::new_v4().to_string();
   conn.execute("DELETE FROM scores", [])?;
+  conn.execute("DELETE FROM practice_segments", [])?;
   conn.execute(
     r#"
     INSERT INTO scores (id, file_name, relative_path, format, imported_at, measure_count)
-    VALUES (?1, ?2, ?3, 'musicxml', ?4, ?5)
+    VALUES (?1, ?2, ?3, 'pdf', ?4, 0)
     "#,
-    params![Uuid::new_v4().to_string(), file_name, relative_path, now(), measure_count],
+    params![score_id, file_name, relative_path, now()],
   )?;
   Ok(())
+}
+
+pub fn upsert_practice_segment(project_root: &Path, segment: &PracticeSegment) -> Result<()> {
+  let conn = open_project_conn(project_root)?;
+  conn.execute(
+    r#"
+    INSERT INTO practice_segments (
+      id, score_id, name, position, start_page, end_page, start_x, start_y, end_x, end_y,
+      measure_start, measure_end, reference_id, reference_start_ms, reference_end_ms,
+      status, notes, created_at, updated_at
+    )
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      position = excluded.position,
+      start_page = excluded.start_page,
+      end_page = excluded.end_page,
+      start_x = excluded.start_x,
+      start_y = excluded.start_y,
+      end_x = excluded.end_x,
+      end_y = excluded.end_y,
+      measure_start = excluded.measure_start,
+      measure_end = excluded.measure_end,
+      reference_id = excluded.reference_id,
+      reference_start_ms = excluded.reference_start_ms,
+      reference_end_ms = excluded.reference_end_ms,
+      status = excluded.status,
+      notes = excluded.notes,
+      updated_at = excluded.updated_at
+    "#,
+    params![
+      segment.id,
+      segment.score_id,
+      segment.name,
+      segment.position,
+      segment.start_page,
+      segment.end_page,
+      segment.start_x,
+      segment.start_y,
+      segment.end_x,
+      segment.end_y,
+      segment.measure_start,
+      segment.measure_end,
+      segment.reference_id,
+      segment.reference_start_ms,
+      segment.reference_end_ms,
+      segment.status,
+      segment.notes,
+      segment.created_at,
+      segment.updated_at,
+    ],
+  )?;
+  Ok(())
+}
+
+pub fn remove_practice_segment(project_root: &Path, segment_id: &str) -> Result<()> {
+  let conn = open_project_conn(project_root)?;
+  conn.execute("DELETE FROM practice_segments WHERE id = ?1", [segment_id])?;
+  conn.execute("UPDATE recordings SET segment_id = NULL WHERE segment_id = ?1", [segment_id])?;
+  Ok(())
+}
+
+pub fn reorder_practice_segments(project_root: &Path, segment_ids: &[String]) -> Result<()> {
+  let conn = open_project_conn(project_root)?;
+  for (index, segment_id) in segment_ids.iter().enumerate() {
+    conn.execute(
+      "UPDATE practice_segments SET position = ?1, updated_at = ?2 WHERE id = ?3",
+      params![index as i64, now(), segment_id],
+    )?;
+  }
+  Ok(())
+}
+
+pub fn load_practice_segment(project_root: &Path, segment_id: &str) -> Result<Option<PracticeSegment>> {
+  let conn = open_project_conn(project_root)?;
+  conn
+    .query_row(
+      r#"
+      SELECT id, score_id, name, position, start_page, end_page, start_x, start_y, end_x, end_y,
+             measure_start, measure_end, reference_id, reference_start_ms, reference_end_ms,
+             status, notes, created_at, updated_at
+      FROM practice_segments
+      WHERE id = ?1
+      "#,
+      [segment_id],
+      |row| {
+        Ok(PracticeSegment {
+          id: row.get(0)?,
+          score_id: row.get(1)?,
+          name: row.get(2)?,
+          position: row.get(3)?,
+          start_page: row.get(4)?,
+          end_page: row.get(5)?,
+          start_x: row.get(6)?,
+          start_y: row.get(7)?,
+          end_x: row.get(8)?,
+          end_y: row.get(9)?,
+          measure_start: row.get(10)?,
+          measure_end: row.get(11)?,
+          reference_id: row.get(12)?,
+          reference_start_ms: row.get(13)?,
+          reference_end_ms: row.get(14)?,
+          status: row.get(15)?,
+          notes: row.get(16)?,
+          created_at: row.get(17)?,
+          updated_at: row.get(18)?,
+        })
+      },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn next_segment_position(project_root: &Path, score_id: &str) -> Result<i64> {
+  let conn = open_project_conn(project_root)?;
+  let max_position: Option<i64> = conn.query_row(
+    "SELECT MAX(position) FROM practice_segments WHERE score_id = ?1",
+    [score_id],
+    |row| row.get(0),
+  )?;
+  Ok(max_position.map(|value| value + 1).unwrap_or(0))
+}
+
+pub fn current_score_id(project_root: &Path) -> Result<Option<String>> {
+  let conn = open_project_conn(project_root)?;
+  conn
+    .query_row("SELECT id FROM scores ORDER BY imported_at DESC LIMIT 1", [], |row| row.get(0))
+    .optional()
+    .map_err(Into::into)
 }
 
 pub fn insert_reference(project_root: &Path, name: &str, file_name: &str, relative_path: &str) -> Result<ReferenceAsset> {
@@ -895,10 +944,10 @@ pub fn insert_recording(project_root: &Path, recording: &RecordingAttempt) -> Re
   conn.execute(
     r#"
     INSERT INTO recordings (
-      id, project_id, name, file_name, relative_path, reference_id, notes, created_at,
-      measure_start, measure_end, recorded_at, duration_ms
+      id, project_id, name, file_name, relative_path, reference_id, segment_id, notes, created_at,
+      recorded_at, duration_ms
     )
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
     "#,
     params![
       recording.id,
@@ -907,10 +956,9 @@ pub fn insert_recording(project_root: &Path, recording: &RecordingAttempt) -> Re
       recording.file_name,
       recording.relative_path,
       recording.reference_id,
+      recording.segment_id,
       recording.notes,
       recording.created_at,
-      recording.measure_start,
-      recording.measure_end,
       recording.recorded_at,
       recording.duration_ms,
     ],
@@ -922,7 +970,7 @@ pub fn load_recording(conn: &Connection, recording_id: &str) -> Result<Option<Re
   conn
     .query_row(
       r#"
-      SELECT id, project_id, name, file_name, relative_path, reference_id, notes, created_at, measure_start, measure_end, recorded_at, duration_ms
+      SELECT id, project_id, name, file_name, relative_path, reference_id, segment_id, notes, created_at, recorded_at, duration_ms
       FROM recordings
       WHERE id = ?1
       "#,
@@ -935,12 +983,11 @@ pub fn load_recording(conn: &Connection, recording_id: &str) -> Result<Option<Re
           file_name: row.get(3)?,
           relative_path: row.get(4)?,
           reference_id: row.get(5)?,
-          notes: row.get(6)?,
-          created_at: row.get(7)?,
-          measure_start: row.get(8)?,
-          measure_end: row.get(9)?,
-          recorded_at: row.get(10)?,
-          duration_ms: row.get(11)?,
+          segment_id: row.get(6)?,
+          notes: row.get(7)?,
+          created_at: row.get(8)?,
+          recorded_at: row.get(9)?,
+          duration_ms: row.get(10)?,
         })
       },
     )
@@ -956,8 +1003,7 @@ pub fn update_recording(project_root: &Path, recording: &RecordingAttempt) -> Re
     SET name = ?2,
         reference_id = ?3,
         notes = ?4,
-        measure_start = ?5,
-        measure_end = ?6
+        segment_id = ?5
     WHERE id = ?1
     "#,
     params![
@@ -965,8 +1011,7 @@ pub fn update_recording(project_root: &Path, recording: &RecordingAttempt) -> Re
       recording.name,
       recording.reference_id,
       recording.notes,
-      recording.measure_start,
-      recording.measure_end,
+      recording.segment_id,
     ],
   )?;
   Ok(())
@@ -974,7 +1019,20 @@ pub fn update_recording(project_root: &Path, recording: &RecordingAttempt) -> Re
 
 pub fn delete_recording(project_root: &Path, recording_id: &str) -> Result<()> {
   let conn = open_project_conn(project_root)?;
+  let relative_path: Option<String> = conn
+    .query_row(
+      "SELECT relative_path FROM recordings WHERE id = ?1",
+      [recording_id],
+      |row| row.get(0),
+    )
+    .optional()?;
   conn.execute("DELETE FROM recordings WHERE id = ?1", [recording_id])?;
+  if let Some(relative_path) = relative_path {
+    let absolute_path = project_root.join(relative_path);
+    if absolute_path.exists() {
+      fs::remove_file(&absolute_path).ok();
+    }
+  }
   Ok(())
 }
 
@@ -1047,8 +1105,6 @@ pub fn start_practice_session(project_root: &Path, project_id: &str) -> Result<P
     project_id,
     "session_start",
     "Started practice session",
-    None,
-    None,
     None,
     None,
     None,
@@ -1126,8 +1182,6 @@ pub fn end_practice_session(project_root: &Path, project_id: &str) -> Result<Opt
     None,
     None,
     None,
-    None,
-    None,
   );
   conn.execute(
     "UPDATE project SET active_practice_session_id = NULL, updated_at = ?1",
@@ -1146,11 +1200,9 @@ pub fn log_practice_activity(
   kind: &str,
   title: &str,
   detail: Option<&str>,
-  measure_start: Option<i64>,
-  measure_end: Option<i64>,
+  segment_id: Option<&str>,
   reference_id: Option<&str>,
   recording_id: Option<&str>,
-  bookmark_id: Option<&str>,
 ) -> Result<()> {
   let conn = open_project_conn(project_root)?;
   let session_id: Option<String> = conn
@@ -1159,10 +1211,9 @@ pub fn log_practice_activity(
   conn.execute(
     r#"
     INSERT INTO practice_activity (
-      id, project_id, session_id, kind, title, detail, measure_start, measure_end,
-      reference_id, recording_id, bookmark_id, created_at
+      id, project_id, session_id, kind, title, detail, segment_id, reference_id, recording_id, created_at
     )
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
     "#,
     params![
       generate_id(),
@@ -1171,99 +1222,10 @@ pub fn log_practice_activity(
       kind,
       title,
       detail,
-      measure_start,
-      measure_end,
+      segment_id,
       reference_id,
       recording_id,
-      bookmark_id,
       now(),
-    ],
-  )?;
-  Ok(())
-}
-
-pub fn upsert_marker(project_root: &Path, marker: &MeasureMarker) -> Result<()> {
-  let conn = open_project_conn(project_root)?;
-  conn.execute(
-    r#"
-    INSERT INTO markers (id, measure_number, timestamp_ms, label, note_text, created_at, updated_at)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-    ON CONFLICT(id) DO UPDATE SET
-      measure_number = excluded.measure_number,
-      timestamp_ms = excluded.timestamp_ms,
-      label = excluded.label,
-      note_text = excluded.note_text,
-      updated_at = excluded.updated_at
-    "#,
-    params![
-      marker.id,
-      marker.measure_number,
-      marker.timestamp_ms,
-      marker.label,
-      marker.note_text,
-      marker.created_at,
-      marker.updated_at,
-    ],
-  )?;
-  Ok(())
-}
-
-pub fn upsert_loop_range(project_root: &Path, loop_range: &LoopRange) -> Result<()> {
-  let conn = open_project_conn(project_root)?;
-  if loop_range.is_active {
-    conn.execute("UPDATE loop_ranges SET is_active = 0", [])?;
-  }
-  conn.execute(
-    r#"
-    INSERT INTO loop_ranges (id, name, start_measure, end_measure, is_active, created_at, updated_at)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-    ON CONFLICT(id) DO UPDATE SET
-      name = excluded.name,
-      start_measure = excluded.start_measure,
-      end_measure = excluded.end_measure,
-      is_active = excluded.is_active,
-      updated_at = excluded.updated_at
-    "#,
-    params![
-      loop_range.id,
-      loop_range.name,
-      loop_range.start_measure,
-      loop_range.end_measure,
-      if loop_range.is_active { 1 } else { 0 },
-      loop_range.created_at,
-      loop_range.updated_at,
-    ],
-  )?;
-  Ok(())
-}
-
-pub fn upsert_bookmark(project_root: &Path, bookmark: &Bookmark) -> Result<()> {
-  let conn = open_project_conn(project_root)?;
-  conn.execute(
-    r#"
-    INSERT INTO bookmarks (id, measure_number, measure_start, measure_end, label, note_text, color, status, created_at, updated_at)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-    ON CONFLICT(id) DO UPDATE SET
-      measure_number = excluded.measure_number,
-      measure_start = excluded.measure_start,
-      measure_end = excluded.measure_end,
-      label = excluded.label,
-      note_text = excluded.note_text,
-      color = excluded.color,
-      status = excluded.status,
-      updated_at = excluded.updated_at
-    "#,
-    params![
-      bookmark.id,
-      bookmark.measure_start,
-      bookmark.measure_start,
-      bookmark.measure_end,
-      bookmark.label,
-      bookmark.note_text,
-      bookmark.color,
-      bookmark.status,
-      bookmark.created_at,
-      bookmark.updated_at,
     ],
   )?;
   Ok(())
@@ -1312,46 +1274,27 @@ pub fn remove_reference(project_root: &Path, reference_id: &str) -> Result<()> {
   Ok(())
 }
 
-pub fn remove_marker(project_root: &Path, marker_id: &str) -> Result<()> {
+pub fn reference_exists(project_root: &Path, reference_id: &str) -> Result<bool> {
   let conn = open_project_conn(project_root)?;
-  conn.execute("DELETE FROM markers WHERE id = ?1", [marker_id])?;
-  Ok(())
-}
-
-pub fn remove_loop_range(project_root: &Path, loop_range_id: &str) -> Result<()> {
-  let conn = open_project_conn(project_root)?;
-  conn.execute("DELETE FROM loop_ranges WHERE id = ?1", [loop_range_id])?;
-  Ok(())
-}
-
-pub fn remove_bookmark(project_root: &Path, bookmark_id: &str) -> Result<()> {
-  let conn = open_project_conn(project_root)?;
-  conn.execute("DELETE FROM bookmarks WHERE id = ?1", [bookmark_id])?;
-  Ok(())
+  let count: i64 = conn.query_row(
+    "SELECT COUNT(*) FROM references_table WHERE id = ?1",
+    [reference_id],
+    |row| row.get(0),
+  )?;
+  Ok(count > 0)
 }
 
 pub fn set_active_reference(project_root: &Path, reference_id: Option<&str>) -> Result<()> {
+  if let Some(reference_id) = reference_id {
+    if !reference_exists(project_root, reference_id)? {
+      return Err(anyhow!("Reference not found"));
+    }
+  }
   let conn = open_project_conn(project_root)?;
-  let current = conn
-    .query_row(
-      "SELECT id, name, notes, notes_updated_at, active_reference_id, active_recording_id, created_at, updated_at FROM project LIMIT 1",
-      [],
-      |row| {
-        Ok((
-          row.get::<_, String>(0)?,
-          row.get::<_, String>(1)?,
-          row.get::<_, String>(2)?,
-          row.get::<_, Option<String>>(3)?,
-          row.get::<_, Option<String>>(4)?,
-          row.get::<_, Option<String>>(5)?,
-          row.get::<_, String>(6)?,
-          row.get::<_, String>(7)?,
-        ))
-      },
-    )?;
+  let current: String = conn.query_row("SELECT id FROM project LIMIT 1", [], |row| row.get(0))?;
   conn.execute(
     "UPDATE project SET active_reference_id = ?1, updated_at = ?2 WHERE id = ?3",
-    params![reference_id, now(), current.0],
+    params![reference_id, now(), current],
   )?;
   Ok(())
 }
@@ -1409,17 +1352,14 @@ pub fn generate_id() -> String {
   Uuid::new_v4().to_string()
 }
 
-pub fn validate_musicxml(path: &Path) -> Result<i64> {
-  let text = fs::read_to_string(path)
-    .with_context(|| format!("Unable to read score file {}", path.display()))?;
-  let regex = Regex::new(r#"<measure[^>]*number="(\d+)""#)?;
-  let mut max_measure = 0_i64;
-  for capture in regex.captures_iter(&text) {
-    if let Ok(value) = capture[1].parse::<i64>() {
-      max_measure = max_measure.max(value);
-    }
+pub fn validate_pdf(path: &Path) -> Result<()> {
+  let bytes = fs::read(path)
+    .with_context(|| format!("Unable to read PDF score file {}", path.display()))?;
+  if bytes.starts_with(b"%PDF-") {
+    Ok(())
+  } else {
+    Err(anyhow!("The selected score is not a valid PDF file."))
   }
-  Ok(max_measure.max(0))
 }
 
 pub fn copy_asset(source_path: &Path, destination_path: &Path) -> Result<()> {
@@ -1437,9 +1377,85 @@ pub fn copy_asset(source_path: &Path, destination_path: &Path) -> Result<()> {
 }
 
 pub fn append_extension(name: &str, extension: &str) -> String {
-  if name.ends_with(extension) {
-    name.to_string()
+  let file_name = Path::new(name)
+    .file_name()
+    .and_then(|value| value.to_str())
+    .unwrap_or("asset")
+    .trim();
+  let file_name = if file_name.is_empty() { "asset" } else { file_name };
+  let extension = extension.trim().trim_start_matches('.');
+  if extension.is_empty() || file_name_has_extension(file_name, extension) {
+    file_name.to_string()
   } else {
-    format!("{name}.{extension}")
+    format!("{file_name}.{extension}")
+  }
+}
+
+pub fn unique_destination_path(directory: &Path, file_name: &str) -> PathBuf {
+  let file_name = Path::new(file_name)
+    .file_name()
+    .and_then(|value| value.to_str())
+    .unwrap_or("asset")
+    .trim();
+  let file_name = if file_name.is_empty() { "asset" } else { file_name };
+  let requested = Path::new(file_name);
+  let stem = requested
+    .file_stem()
+    .and_then(|value| value.to_str())
+    .filter(|value| !value.is_empty())
+    .unwrap_or("asset");
+  let extension = requested.extension().and_then(|value| value.to_str());
+
+  let first = directory.join(file_name);
+  if !first.exists() {
+    return first;
+  }
+
+  for index in 1.. {
+    let candidate_name = match extension {
+      Some(extension) if !extension.is_empty() => format!("{stem}-{index}.{extension}"),
+      _ => format!("{stem}-{index}"),
+    };
+    let candidate = directory.join(candidate_name);
+    if !candidate.exists() {
+      return candidate;
+    }
+  }
+  unreachable!("unbounded search always returns a destination path")
+}
+
+fn file_name_has_extension(file_name: &str, extension: &str) -> bool {
+  Path::new(file_name)
+    .extension()
+    .and_then(|value| value.to_str())
+    .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::fs;
+
+  #[test]
+  fn append_extension_strips_path_components_and_matches_case_insensitively() {
+    assert_eq!(append_extension("../Etude.MUSICXML", "musicxml"), "Etude.MUSICXML");
+    assert_eq!(append_extension("folder/score", ".pdf"), "score.pdf");
+  }
+
+  #[test]
+  fn unique_destination_path_does_not_overwrite_existing_files() {
+    let directory = std::env::temp_dir()
+      .join(format!("reference-practice-test-{}", Uuid::new_v4()));
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("reference.mp3"), b"first").unwrap();
+    fs::write(directory.join("reference-1.mp3"), b"second").unwrap();
+
+    let destination = unique_destination_path(&directory, "reference.mp3");
+    assert_eq!(
+      destination.file_name().and_then(|value| value.to_str()),
+      Some("reference-2.mp3")
+    );
+
+    fs::remove_dir_all(directory).unwrap();
   }
 }

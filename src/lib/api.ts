@@ -4,23 +4,19 @@ import { open as openPath } from "@tauri-apps/api/shell";
 import { convertFileSrc } from "@tauri-apps/api/tauri";
 import { dirname, join } from "@tauri-apps/api/path";
 import type {
-  Bookmark,
   DuplicateRecordingInput,
   EndPracticeSessionInput,
   CreateProjectInput,
   DeleteProjectInput,
   ImportAssetInput,
-  LoopRange,
-  MeasureMarker,
   PracticeActivity,
   PracticeSession,
   PracticeStats,
   ProjectDetail,
   ProjectSummary,
   RenameProjectInput,
-  SaveBookmarkInput,
-  SaveLoopRangeInput,
-  SaveMarkerInput,
+  ReorderPracticeSegmentsInput,
+  SavePracticeSegmentInput,
   SaveRecordingInput,
   UpdateRecordingInput,
 } from "./types";
@@ -30,15 +26,15 @@ export async function listProjects(): Promise<ProjectSummary[]> {
 }
 
 export async function createProject(input: CreateProjectInput): Promise<ProjectSummary> {
-  return invoke("create_project", input);
+  return invoke("create_project", { input });
 }
 
 export async function renameProject(input: RenameProjectInput): Promise<ProjectSummary> {
-  return invoke("rename_project", input);
+  return invoke("rename_project", { input });
 }
 
 export async function deleteProject(input: DeleteProjectInput): Promise<void> {
-  return invoke("delete_project", input);
+  return invoke("delete_project", { input });
 }
 
 export async function loadProject(projectId: string): Promise<ProjectDetail> {
@@ -46,11 +42,11 @@ export async function loadProject(projectId: string): Promise<ProjectDetail> {
 }
 
 export async function importScore(input: ImportAssetInput): Promise<ProjectDetail> {
-  return invoke("import_score", input);
+  return invoke("import_score", { input });
 }
 
 export async function importReference(input: ImportAssetInput): Promise<ProjectDetail> {
-  return invoke("import_reference", input);
+  return invoke("import_reference", { input });
 }
 
 export async function setActiveReference(projectId: string, referenceId: string | null): Promise<ProjectDetail> {
@@ -61,28 +57,16 @@ export async function deleteReference(projectId: string, referenceId: string): P
   return invoke("delete_reference", { projectId, referenceId });
 }
 
-export async function saveMarker(input: SaveMarkerInput): Promise<ProjectDetail> {
-  return invoke("save_marker", input);
+export async function savePracticeSegment(input: SavePracticeSegmentInput): Promise<ProjectDetail> {
+  return invoke("save_practice_segment", { input });
 }
 
-export async function deleteMarker(projectId: string, markerId: string): Promise<ProjectDetail> {
-  return invoke("delete_marker", { projectId, markerId });
+export async function deletePracticeSegment(projectId: string, segmentId: string): Promise<ProjectDetail> {
+  return invoke("delete_practice_segment", { projectId, segmentId });
 }
 
-export async function saveLoopRange(input: SaveLoopRangeInput): Promise<ProjectDetail> {
-  return invoke("save_loop_range", input);
-}
-
-export async function deleteLoopRange(projectId: string, loopRangeId: string): Promise<ProjectDetail> {
-  return invoke("delete_loop_range", { projectId, loopRangeId });
-}
-
-export async function saveBookmark(input: SaveBookmarkInput): Promise<ProjectDetail> {
-  return invoke("save_bookmark", input);
-}
-
-export async function deleteBookmark(projectId: string, bookmarkId: string): Promise<ProjectDetail> {
-  return invoke("delete_bookmark", { projectId, bookmarkId });
+export async function reorderPracticeSegments(input: ReorderPracticeSegmentsInput): Promise<ProjectDetail> {
+  return invoke("reorder_practice_segments", { input });
 }
 
 export async function saveProjectNote(projectId: string, text: string): Promise<ProjectDetail> {
@@ -90,7 +74,7 @@ export async function saveProjectNote(projectId: string, text: string): Promise<
 }
 
 export async function registerRecording(input: SaveRecordingInput): Promise<ProjectDetail> {
-  return invoke("register_recording", input);
+  return invoke("register_recording", { input });
 }
 
 export async function setActiveRecording(projectId: string, recordingId: string | null): Promise<ProjectDetail> {
@@ -98,7 +82,7 @@ export async function setActiveRecording(projectId: string, recordingId: string 
 }
 
 export async function updateRecording(input: UpdateRecordingInput): Promise<ProjectDetail> {
-  return invoke("update_recording", input);
+  return invoke("update_recording", { input });
 }
 
 export async function deleteRecording(projectId: string, recordingId: string): Promise<ProjectDetail> {
@@ -106,20 +90,17 @@ export async function deleteRecording(projectId: string, recordingId: string): P
 }
 
 export async function duplicateRecording(input: DuplicateRecordingInput): Promise<ProjectDetail> {
-  return invoke("duplicate_recording", input);
+  return invoke("duplicate_recording", { input });
 }
 
 export async function endPracticeSession(input: EndPracticeSessionInput): Promise<ProjectDetail> {
-  return invoke("end_practice_session", input);
+  return invoke("end_practice_session", { input });
 }
 
 export async function openScoreFile(): Promise<string | null> {
   return open({
     multiple: false,
-    filters: [
-      { name: "MusicXML", extensions: ["musicxml", "xml"] },
-      { name: "All Files", extensions: ["*"] },
-    ],
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
   }) as Promise<string | null>;
 }
 
@@ -163,12 +144,9 @@ export async function saveBinaryFile(path: string, data: ArrayBuffer): Promise<v
 }
 
 export type {
-  Bookmark,
   PracticeActivity,
   PracticeSession,
   PracticeStats,
-  LoopRange,
-  MeasureMarker,
   ProjectDetail,
   ProjectSummary,
 };

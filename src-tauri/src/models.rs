@@ -29,55 +29,36 @@ pub struct ImportAssetInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SaveMarkerInput {
-  pub project_id: String,
-  pub marker: MarkerDraft,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MarkerDraft {
-  pub id: Option<String>,
-  pub measure_number: i64,
-  pub timestamp_ms: i64,
-  pub label: Option<String>,
-  pub note_text: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SaveLoopRangeInput {
-  pub project_id: String,
-  pub loop_range: LoopRangeDraft,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LoopRangeDraft {
+pub struct PracticeSegmentDraft {
   pub id: Option<String>,
   pub name: String,
-  pub start_measure: i64,
-  pub end_measure: i64,
-  pub is_active: bool,
+  pub start_page: i64,
+  pub end_page: i64,
+  pub start_x: Option<f64>,
+  pub start_y: Option<f64>,
+  pub end_x: Option<f64>,
+  pub end_y: Option<f64>,
+  pub measure_start: Option<i64>,
+  pub measure_end: Option<i64>,
+  pub reference_id: Option<String>,
+  pub reference_start_ms: Option<i64>,
+  pub reference_end_ms: Option<i64>,
+  pub status: Option<String>,
+  pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SaveBookmarkInput {
+pub struct SavePracticeSegmentInput {
   pub project_id: String,
-  pub bookmark: BookmarkDraft,
+  pub segment: PracticeSegmentDraft,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BookmarkDraft {
-  pub id: Option<String>,
-  pub measure_start: i64,
-  pub measure_end: i64,
-  pub label: String,
-  pub note_text: Option<String>,
-  pub color: Option<String>,
-  pub status: String,
+pub struct ReorderPracticeSegmentsInput {
+  pub project_id: String,
+  pub segment_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,8 +75,7 @@ pub struct SaveRecordingInput {
   pub relative_path: String,
   pub name: String,
   pub reference_id: Option<String>,
-  pub measure_start: Option<i64>,
-  pub measure_end: Option<i64>,
+  pub segment_id: Option<String>,
   pub recorded_at: String,
   pub duration_ms: Option<i64>,
 }
@@ -107,8 +87,7 @@ pub struct UpdateRecordingInput {
   pub recording_id: String,
   pub name: String,
   pub notes: Option<String>,
-  pub measure_start: Option<i64>,
-  pub measure_end: Option<i64>,
+  pub segment_id: Option<String>,
   pub reference_id: Option<String>,
 }
 
@@ -139,10 +118,32 @@ pub struct ScoreAsset {
   pub id: String,
   pub file_name: String,
   pub relative_path: String,
-  pub format: String,
   pub imported_at: String,
-  pub measure_count: i64,
-  pub preview_text: String,
+  pub segments: Vec<PracticeSegment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PracticeSegment {
+  pub id: String,
+  pub score_id: String,
+  pub name: String,
+  pub position: i64,
+  pub start_page: i64,
+  pub end_page: i64,
+  pub start_x: Option<f64>,
+  pub start_y: Option<f64>,
+  pub end_x: Option<f64>,
+  pub end_y: Option<f64>,
+  pub measure_start: Option<i64>,
+  pub measure_end: Option<i64>,
+  pub reference_id: Option<String>,
+  pub reference_start_ms: Option<i64>,
+  pub reference_end_ms: Option<i64>,
+  pub status: Option<String>,
+  pub notes: Option<String>,
+  pub created_at: String,
+  pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,50 +165,11 @@ pub struct RecordingAttempt {
   pub file_name: String,
   pub relative_path: String,
   pub reference_id: Option<String>,
+  pub segment_id: Option<String>,
   pub notes: Option<String>,
   pub created_at: String,
-  pub measure_start: Option<i64>,
-  pub measure_end: Option<i64>,
   pub recorded_at: String,
   pub duration_ms: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MeasureMarker {
-  pub id: String,
-  pub measure_number: i64,
-  pub timestamp_ms: i64,
-  pub label: Option<String>,
-  pub note_text: Option<String>,
-  pub created_at: String,
-  pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LoopRange {
-  pub id: String,
-  pub name: String,
-  pub start_measure: i64,
-  pub end_measure: i64,
-  pub is_active: bool,
-  pub created_at: String,
-  pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Bookmark {
-  pub id: String,
-  pub measure_start: i64,
-  pub measure_end: i64,
-  pub label: String,
-  pub note_text: Option<String>,
-  pub color: Option<String>,
-  pub status: String,
-  pub created_at: String,
-  pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,19 +191,17 @@ pub struct PracticeActivity {
   pub kind: String,
   pub title: String,
   pub detail: Option<String>,
-  pub measure_start: Option<i64>,
-  pub measure_end: Option<i64>,
+  pub segment_id: Option<String>,
   pub reference_id: Option<String>,
   pub recording_id: Option<String>,
-  pub bookmark_id: Option<String>,
   pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PracticeRangeStat {
-  pub measure_start: i64,
-  pub measure_end: i64,
+pub struct PracticeSegmentStat {
+  pub segment_id: String,
+  pub segment_name: String,
   pub count: i64,
 }
 
@@ -251,8 +211,8 @@ pub struct PracticeStats {
   pub today_ms: i64,
   pub week_ms: i64,
   pub recording_attempts: i64,
-  pub bookmark_count: i64,
-  pub most_practiced_ranges: Vec<PracticeRangeStat>,
+  pub segment_count: i64,
+  pub most_practiced_segments: Vec<PracticeSegmentStat>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -269,9 +229,6 @@ pub struct ProjectDetail {
   pub score: Option<ScoreAsset>,
   pub references: Vec<ReferenceAsset>,
   pub recordings: Vec<RecordingAttempt>,
-  pub markers: Vec<MeasureMarker>,
-  pub loop_range: Option<LoopRange>,
-  pub bookmarks: Vec<Bookmark>,
   pub practice_sessions: Vec<PracticeSession>,
   pub recent_activity: Vec<PracticeActivity>,
   pub stats: PracticeStats,

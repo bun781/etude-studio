@@ -14,10 +14,33 @@ export type ScoreAsset = {
   id: string;
   fileName: string;
   relativePath: string;
-  format: "musicxml";
   importedAt: string;
-  measureCount: number;
-  previewText: string;
+  segments: PracticeSegment[];
+};
+
+export type PracticeSegmentCoordinate = {
+  x: number;
+  y: number;
+};
+
+export type PracticeSegment = {
+  id: string;
+  scoreId: string;
+  name: string;
+  position: number;
+  startPage: number;
+  endPage: number;
+  startCoordinate: PracticeSegmentCoordinate | null;
+  endCoordinate: PracticeSegmentCoordinate | null;
+  measureStart: number | null;
+  measureEnd: number | null;
+  referenceId: string | null;
+  referenceStartMs: number | null;
+  referenceEndMs: number | null;
+  status: string | null;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type ReferenceAsset = {
@@ -35,44 +58,11 @@ export type RecordingAttempt = {
   fileName: string;
   relativePath: string;
   referenceId: string | null;
+  segmentId: string | null;
   notes: string | null;
   createdAt: string;
-  measureStart: number | null;
-  measureEnd: number | null;
   recordedAt: string;
   durationMs: number | null;
-};
-
-export type MeasureMarker = {
-  id: string;
-  measureNumber: number;
-  timestampMs: number;
-  label: string | null;
-  noteText: string | null;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type LoopRange = {
-  id: string;
-  name: string;
-  startMeasure: number;
-  endMeasure: number;
-  isActive: boolean;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type Bookmark = {
-  id: string;
-  measureStart: number;
-  measureEnd: number;
-  label: string;
-  noteText: string | null;
-  color: string | null;
-  status: string;
-  createdAt: string;
-  updatedAt: string;
 };
 
 export type PracticeSession = {
@@ -90,17 +80,15 @@ export type PracticeActivity = {
   kind: string;
   title: string;
   detail: string | null;
-  measureStart: number | null;
-  measureEnd: number | null;
+  segmentId: string | null;
   referenceId: string | null;
   recordingId: string | null;
-  bookmarkId: string | null;
   createdAt: string;
 };
 
-export type PracticeRangeStat = {
-  measureStart: number;
-  measureEnd: number;
+export type PracticeSegmentStat = {
+  segmentId: string;
+  segmentName: string;
   count: number;
 };
 
@@ -108,8 +96,8 @@ export type PracticeStats = {
   todayMs: number;
   weekMs: number;
   recordingAttempts: number;
-  bookmarkCount: number;
-  mostPracticedRanges: PracticeRangeStat[];
+  segmentCount: number;
+  mostPracticedSegments: PracticeSegmentStat[];
 };
 
 export type ProjectNote = {
@@ -122,9 +110,6 @@ export type ProjectDetail = {
   score: ScoreAsset | null;
   references: ReferenceAsset[];
   recordings: RecordingAttempt[];
-  markers: MeasureMarker[];
-  loopRange: LoopRange | null;
-  bookmarks: Bookmark[];
   practiceSessions: PracticeSession[];
   recentActivity: PracticeActivity[];
   stats: PracticeStats;
@@ -150,39 +135,30 @@ export type ImportAssetInput = {
   name?: string;
 };
 
-export type SaveMarkerInput = {
+export type SavePracticeSegmentInput = {
   projectId: string;
-  marker: {
-    id?: string | null;
-    measureNumber: number;
-    timestampMs: number;
-    label?: string | null;
-    noteText?: string | null;
-  };
-};
-
-export type SaveLoopRangeInput = {
-  projectId: string;
-  loopRange: {
+  segment: {
     id?: string | null;
     name: string;
-    startMeasure: number;
-    endMeasure: number;
-    isActive: boolean;
+    startPage: number;
+    endPage: number;
+    startX?: number | null;
+    startY?: number | null;
+    endX?: number | null;
+    endY?: number | null;
+    measureStart?: number | null;
+    measureEnd?: number | null;
+    referenceId?: string | null;
+    referenceStartMs?: number | null;
+    referenceEndMs?: number | null;
+    status?: string | null;
+    notes?: string | null;
   };
 };
 
-export type SaveBookmarkInput = {
+export type ReorderPracticeSegmentsInput = {
   projectId: string;
-  bookmark: {
-    id?: string | null;
-    measureStart: number;
-    measureEnd: number;
-    label: string;
-    noteText?: string | null;
-    color?: string | null;
-    status: string;
-  };
+  segmentIds: string[];
 };
 
 export type EndPracticeSessionInput = {
@@ -195,8 +171,7 @@ export type SaveRecordingInput = {
   relativePath: string;
   name: string;
   referenceId?: string | null;
-  measureStart: number | null;
-  measureEnd: number | null;
+  segmentId: string | null;
   recordedAt: string;
   durationMs: number | null;
 };
@@ -206,8 +181,7 @@ export type UpdateRecordingInput = {
   recordingId: string;
   name: string;
   notes?: string | null;
-  measureStart?: number | null;
-  measureEnd?: number | null;
+  segmentId?: string | null;
   referenceId?: string | null;
 };
 

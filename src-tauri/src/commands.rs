@@ -1,15 +1,20 @@
+#![allow(non_snake_case)]
+
 use crate::{
   models::*,
   storage::{
-    append_extension, copy_asset, create_project_row, delete_library_project, generate_id, init_project_db,
-    copy_asset as copy_asset_impl, end_practice_session as end_practice_session_impl, insert_recording,
-    insert_reference, insert_score, list_projects as list_projects_impl, load_project_detail, load_project_summary,
-    load_recording, log_practice_activity, now, open_project_conn, project_root, remove_bookmark, remove_loop_range,
-    remove_marker, delete_recording as remove_recording_impl, remove_reference, rename_project_root,
-    set_active_reference as set_active_reference_impl,
-    set_active_recording as set_active_recording_impl, set_project_note, start_practice_session as start_practice_session_impl,
-    update_library_project, update_project_summary, update_recording as update_recording_impl, upsert_bookmark, upsert_loop_range,
-    upsert_marker, validate_musicxml, AppPaths,
+    append_extension, copy_asset, create_project_row, current_score_id, delete_library_project,
+    delete_recording as remove_recording_impl,
+    end_practice_session as end_practice_session_impl, generate_id, init_project_db,
+    insert_recording, insert_reference, insert_score, list_projects as list_projects_impl,
+    load_practice_segment, load_project_detail, load_project_summary, load_recording, log_practice_activity,
+    next_segment_position, now, open_project_conn, project_root, remove_practice_segment,
+    remove_reference, rename_project_root, reorder_practice_segments as reorder_segments_impl,
+    set_active_recording as set_active_recording_impl,
+    set_active_reference as set_active_reference_impl, set_project_note,
+    start_practice_session as start_practice_session_impl, unique_destination_path,
+    update_library_project, update_project_summary, update_recording as update_recording_impl,
+    upsert_practice_segment, validate_pdf, AppPaths,
   },
 };
 use anyhow::Result;
@@ -106,22 +111,23 @@ pub fn import_score(paths: State<AppPaths>, input: ImportAssetInput) -> CommandR
     } = input;
     let (_, root) = load_project_summary(&paths.workspace_root, &project_id)?;
     let source = PathBuf::from(&source_path);
-    let extension = source
-      .extension()
-      .and_then(|value| value.to_str())
-      .unwrap_or("musicxml");
-    let file_name = append_extension(
+    let requested_file_name = append_extension(
       &name.unwrap_or_else(|| source.file_stem().and_then(|v| v.to_str()).unwrap_or("score").to_string()),
-      extension,
+      "pdf",
     );
-    let destination = root.join("score").join(&file_name);
+    validate_pdf(&source)?;
+    let destination = root.join("score").join(&requested_file_name);
     copy_asset(&source, &destination)?;
-    let measure_count = validate_musicxml(&destination)?;
+    let file_name = destination
+      .file_name()
+      .and_then(|value| value.to_str())
+      .unwrap_or(requested_file_name.as_str())
+      .to_string();
     let relative = destination
       .strip_prefix(&root)?
       .to_string_lossy()
       .to_string();
-    insert_score(&root, &file_name, &relative, measure_count)?;
+    insert_score(&root, &file_name, &relative)?;
     let _ = log_practice_activity(
       &root,
       &project_id,
@@ -131,9 +137,100 @@ pub fn import_score(paths: State<AppPaths>, input: ImportAssetInput) -> CommandR
       None,
       None,
       None,
-      None,
-      None,
     );
+    load_project_detail(&root)
+  })())
+}
+
+#[tauri::command]
+pub fn save_practice_segment(paths: State<AppPaths>, input: SavePracticeSegmentInput) -> CommandResult<ProjectDetail> {
+  map_err((|| -> Result<ProjectDetail> {
+    let SavePracticeSegmentInput { project_id, segment } = input;
+    let (_, root) = load_project_summary(&paths.workspace_root, &project_id)?;
+    let score_id = current_score_id(&root)?
+      .ok_or_else(|| anyhow::anyhow!("Import a score before creating a practice segment"))?;
+    let timestamp = now();
+    let PracticeSegmentDraft {
+      id,
+      name,
+      start_page,
+      end_page,
+      start_x,
+      start_y,
+      end_x,
+      end_y,
+      measure_start,
+      measure_end,
+      reference_id,
+      reference_start_ms,
+      reference_end_ms,
+      status,
+      notes,
+    } = segment;
+    let is_new = id.is_none();
+    let existing = match &id {
+      Some(existing_id) => load_practice_segment(&root, existing_id)?,
+      None => None,
+    };
+    let id = id.unwrap_or_else(generate_id);
+    let position = match &existing {
+      Some(existing) => existing.position,
+      None => next_segment_position(&root, &score_id)?,
+    };
+    let created_at = existing.map(|existing| existing.created_at).unwrap_or_else(|| timestamp.clone());
+    let segment = PracticeSegment {
+      id,
+      score_id,
+      name: if name.trim().is_empty() { String::from("Untitled segment") } else { name.trim().to_string() },
+      position,
+      start_page: start_page.max(1),
+      end_page: end_page.max(start_page.max(1)),
+      start_x,
+      start_y,
+      end_x,
+      end_y,
+      measure_start,
+      measure_end,
+      reference_id,
+      reference_start_ms,
+      reference_end_ms,
+      status,
+      notes,
+      created_at,
+      updated_at: timestamp,
+    };
+    upsert_practice_segment(&root, &segment)?;
+    if is_new {
+      let _ = log_practice_activity(
+        &root,
+        &project_id,
+        "segment_create",
+        "Created practice segment",
+        Some(&segment.name),
+        Some(&segment.id),
+        None,
+        None,
+      );
+    }
+    load_project_detail(&root)
+  })())
+}
+
+#[tauri::command]
+pub fn delete_practice_segment(paths: State<AppPaths>, projectId: String, segmentId: String) -> CommandResult<ProjectDetail> {
+  map_err((|| -> Result<ProjectDetail> {
+    let (_, root) = load_project_summary(&paths.workspace_root, &projectId)?;
+    remove_practice_segment(&root, &segmentId)?;
+    load_project_detail(&root)
+  })())
+}
+
+#[tauri::command]
+pub fn reorder_practice_segments(paths: State<AppPaths>, input: ReorderPracticeSegmentsInput) -> CommandResult<ProjectDetail> {
+  map_err((|| -> Result<ProjectDetail> {
+    let ReorderPracticeSegmentsInput { project_id, segment_ids } = input;
+    let (_, root) = load_project_summary(&paths.workspace_root, &project_id)?;
+    reorder_segments_impl(&root, &segment_ids)?;
     load_project_detail(&root)
   })())
 }
@@ -148,13 +245,18 @@ pub fn import_reference(paths: State<AppPaths>, input: ImportAssetInput) -> Comm
     } = input;
     let (_, root) = load_project_summary(&paths.workspace_root, &project_id)?;
     let source = PathBuf::from(&source_path);
-    let file_name = source
+    let requested_file_name = source
       .file_name()
       .and_then(|value| value.to_str())
       .unwrap_or("reference.bin")
       .to_string();
-    let destination = root.join("references").join(&file_name);
+    let destination = unique_destination_path(&root.join("references"), &requested_file_name);
     copy_asset(&source, &destination)?;
+    let file_name = destination
+      .file_name()
+      .and_then(|value| value.to_str())
+      .unwrap_or(requested_file_name.as_str())
+      .to_string();
     let name = name.unwrap_or_else(|| {
       source
         .file_stem()
@@ -173,15 +275,17 @@ pub fn import_reference(paths: State<AppPaths>, input: ImportAssetInput) -> Comm
       None,
       None,
       None,
-      None,
-      None,
     );
     load_project_detail(&root)
   })())
 }
 
 #[tauri::command]
-pub fn delete_reference(paths: State<AppPaths>, projectId: String, referenceId: String) -> CommandResult<ProjectDetail> {
+pub fn delete_reference(
+  paths: State<AppPaths>,
+  projectId: String,
+  referenceId: String,
+) -> CommandResult<ProjectDetail> {
   map_err((|| -> Result<ProjectDetail> {
     let (mut summary, root) = load_project_summary(&paths.workspace_root, &projectId)?;
     if summary.active_reference_id.as_deref() == Some(referenceId.as_str()) {
@@ -196,137 +300,17 @@ pub fn delete_reference(paths: State<AppPaths>, projectId: String, referenceId: 
 }
 
 #[tauri::command]
-pub fn set_active_reference(paths: State<AppPaths>, projectId: String, referenceId: Option<String>) -> CommandResult<ProjectDetail> {
+pub fn set_active_reference(
+  paths: State<AppPaths>,
+  projectId: String,
+  referenceId: Option<String>,
+) -> CommandResult<ProjectDetail> {
   map_err((|| -> Result<ProjectDetail> {
     let (mut summary, root) = load_project_summary(&paths.workspace_root, &projectId)?;
     set_active_reference_impl(&root, referenceId.as_deref())?;
     summary.active_reference_id = referenceId;
     summary.updated_at = now();
     update_library_project(&paths.workspace_root, &summary)?;
-    load_project_detail(&root)
-  })())
-}
-
-#[tauri::command]
-pub fn save_marker(paths: State<AppPaths>, input: SaveMarkerInput) -> CommandResult<ProjectDetail> {
-  map_err((|| -> Result<ProjectDetail> {
-    let SaveMarkerInput { project_id, marker } = input;
-    let (_, root) = load_project_summary(&paths.workspace_root, &project_id)?;
-    let now_text = now();
-    let MarkerDraft {
-      id,
-      measure_number,
-      timestamp_ms,
-      label,
-      note_text,
-    } = marker;
-    let marker = MeasureMarker {
-      id: id.unwrap_or_else(generate_id),
-      measure_number,
-      timestamp_ms,
-      label,
-      note_text,
-      created_at: now_text.clone(),
-      updated_at: now_text,
-    };
-    upsert_marker(&root, &marker)?;
-    load_project_detail(&root)
-  })())
-}
-
-#[tauri::command]
-pub fn delete_marker(paths: State<AppPaths>, projectId: String, markerId: String) -> CommandResult<ProjectDetail> {
-  map_err((|| -> Result<ProjectDetail> {
-    let (_, root) = load_project_summary(&paths.workspace_root, &projectId)?;
-    remove_marker(&root, &markerId)?;
-    load_project_detail(&root)
-  })())
-}
-
-#[tauri::command]
-pub fn save_loop_range(paths: State<AppPaths>, input: SaveLoopRangeInput) -> CommandResult<ProjectDetail> {
-  map_err((|| -> Result<ProjectDetail> {
-    let SaveLoopRangeInput { project_id, loop_range } = input;
-    let (_, root) = load_project_summary(&paths.workspace_root, &project_id)?;
-    let timestamp = now();
-    let LoopRangeDraft {
-      id,
-      name,
-      start_measure,
-      end_measure,
-      is_active,
-    } = loop_range;
-    let loop_range = LoopRange {
-      id: id.unwrap_or_else(generate_id),
-      name,
-      start_measure,
-      end_measure,
-      is_active,
-      created_at: timestamp.clone(),
-      updated_at: timestamp,
-    };
-    upsert_loop_range(&root, &loop_range)?;
-    load_project_detail(&root)
-  })())
-}
-
-#[tauri::command]
-pub fn delete_loop_range(paths: State<AppPaths>, projectId: String, loopRangeId: String) -> CommandResult<ProjectDetail> {
-  map_err((|| -> Result<ProjectDetail> {
-    let (_, root) = load_project_summary(&paths.workspace_root, &projectId)?;
-    remove_loop_range(&root, &loopRangeId)?;
-    load_project_detail(&root)
-  })())
-}
-
-#[tauri::command]
-pub fn save_bookmark(paths: State<AppPaths>, input: SaveBookmarkInput) -> CommandResult<ProjectDetail> {
-  map_err((|| -> Result<ProjectDetail> {
-    let SaveBookmarkInput { project_id, bookmark } = input;
-    let (_, root) = load_project_summary(&paths.workspace_root, &project_id)?;
-    let timestamp = now();
-    let BookmarkDraft {
-      id,
-      measure_start,
-      measure_end,
-      label,
-      note_text,
-      color,
-      status,
-    } = bookmark;
-    let bookmark = Bookmark {
-      id: id.unwrap_or_else(generate_id),
-      measure_start: measure_start.min(measure_end),
-      measure_end: measure_start.max(measure_end),
-      label,
-      note_text,
-      color,
-      status,
-      created_at: timestamp.clone(),
-      updated_at: timestamp,
-    };
-    upsert_bookmark(&root, &bookmark)?;
-    let _ = log_practice_activity(
-      &root,
-      &project_id,
-      "bookmark",
-      "Saved bookmark",
-      Some(&bookmark.label),
-      Some(bookmark.measure_start),
-      Some(bookmark.measure_end),
-      None,
-      None,
-      Some(&bookmark.id),
-    );
-    load_project_detail(&root)
-  })())
-}
-
-#[tauri::command]
-pub fn delete_bookmark(paths: State<AppPaths>, projectId: String, bookmarkId: String) -> CommandResult<ProjectDetail> {
-  map_err((|| -> Result<ProjectDetail> {
-    let (_, root) = load_project_summary(&paths.workspace_root, &projectId)?;
-    remove_bookmark(&root, &bookmarkId)?;
     load_project_detail(&root)
   })())
 }
@@ -349,8 +333,7 @@ pub fn register_recording(paths: State<AppPaths>, input: SaveRecordingInput) -> 
       relative_path,
       name,
       reference_id,
-      measure_start,
-      measure_end,
+      segment_id,
       recorded_at,
       duration_ms,
     } = input;
@@ -362,10 +345,9 @@ pub fn register_recording(paths: State<AppPaths>, input: SaveRecordingInput) -> 
       file_name,
       relative_path,
       reference_id: reference_id.or(summary.active_reference_id.clone()),
+      segment_id,
       notes: None,
       created_at: now(),
-      measure_start,
-      measure_end,
       recorded_at,
       duration_ms,
     };
@@ -376,11 +358,9 @@ pub fn register_recording(paths: State<AppPaths>, input: SaveRecordingInput) -> 
       "recording",
       "Created recording",
       Some(&recording.name),
-      recording.measure_start,
-      recording.measure_end,
+      recording.segment_id.as_deref(),
       None,
       Some(&recording.id),
-      None,
     );
     summary.updated_at = now();
     update_library_project(&paths.workspace_root, &summary)?;
@@ -421,8 +401,7 @@ pub fn update_recording(paths: State<AppPaths>, input: UpdateRecordingInput) -> 
       recording_id,
       name,
       notes,
-      measure_start,
-      measure_end,
+      segment_id,
       reference_id,
     } = input;
     let (mut summary, root) = load_project_summary(&paths.workspace_root, &project_id)?;
@@ -431,8 +410,7 @@ pub fn update_recording(paths: State<AppPaths>, input: UpdateRecordingInput) -> 
     let mut recording = recording.ok_or_else(|| anyhow::anyhow!("Recording not found"))?;
     recording.name = name;
     recording.notes = notes;
-    recording.measure_start = measure_start;
-    recording.measure_end = measure_end;
+    recording.segment_id = segment_id;
     recording.reference_id = reference_id;
     update_recording_impl(&root, &recording)?;
     let _ = log_practice_activity(
@@ -441,11 +419,9 @@ pub fn update_recording(paths: State<AppPaths>, input: UpdateRecordingInput) -> 
       "recording_update",
       "Updated recording",
       Some(&recording.name),
-      recording.measure_start,
-      recording.measure_end,
+      recording.segment_id.as_deref(),
       recording.reference_id.as_deref(),
       Some(&recording.id),
-      None,
     );
     summary.updated_at = now();
     update_library_project(&paths.workspace_root, &summary)?;
@@ -492,7 +468,7 @@ pub fn duplicate_recording(paths: State<AppPaths>, input: DuplicateRecordingInpu
     );
     let duplicate_relative = PathBuf::from("recordings").join(&duplicate_file_name);
     let destination = root.join(&duplicate_relative);
-    copy_asset_impl(&source_path, &destination)?;
+    copy_asset(&source_path, &destination)?;
     let duplicate = RecordingAttempt {
       id: duplicate_id,
       project_id: project_id.clone(),
@@ -500,10 +476,9 @@ pub fn duplicate_recording(paths: State<AppPaths>, input: DuplicateRecordingInpu
       file_name: duplicate_file_name,
       relative_path: duplicate_relative.to_string_lossy().to_string(),
       reference_id: original.reference_id.clone(),
+      segment_id: original.segment_id.clone(),
       notes: original.notes.clone(),
       created_at: now(),
-      measure_start: original.measure_start,
-      measure_end: original.measure_end,
       recorded_at: original.recorded_at.clone(),
       duration_ms: original.duration_ms,
     };

@@ -1,18 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
-import type { RecordingAttempt, ReferenceAsset } from "../lib/types";
+import type { PracticeSegment, RecordingAttempt, ReferenceAsset } from "../lib/types";
 
 type RecordingDraft = {
   name: string;
   notes: string;
-  measureStart: string;
-  measureEnd: string;
+  segmentId: string;
   referenceId: string;
 };
 
 type Props = {
-  projectName: string;
   recordings: RecordingAttempt[];
   references: ReferenceAsset[];
+  segments: PracticeSegment[];
   selectedRecordingId: string | null;
   onSelectRecording: (recordingId: string) => void;
   onSaveRecording: (recordingId: string, draft: RecordingDraft) => void;
@@ -21,7 +20,7 @@ type Props = {
   onOpenRecordingFolder: (recordingId: string) => void;
 };
 
-type GroupBy = "project" | "date" | "measure" | "reference";
+type GroupBy = "segment" | "date" | "reference";
 type SortBy = "newest" | "oldest" | "title" | "duration";
 
 type GroupedRecordings = {
@@ -31,9 +30,9 @@ type GroupedRecordings = {
 };
 
 export function RecordingBrowser({
-  projectName,
   recordings,
   references,
+  segments,
   selectedRecordingId,
   onSelectRecording,
   onSaveRecording,
@@ -42,13 +41,12 @@ export function RecordingBrowser({
   onOpenRecordingFolder,
 }: Props) {
   const [search, setSearch] = useState("");
-  const [groupBy, setGroupBy] = useState<GroupBy>("date");
+  const [groupBy, setGroupBy] = useState<GroupBy>("segment");
   const [sortBy, setSortBy] = useState<SortBy>("newest");
   const [draft, setDraft] = useState<RecordingDraft>({
     name: "",
     notes: "",
-    measureStart: "",
-    measureEnd: "",
+    segmentId: "",
     referenceId: "",
   });
 
@@ -59,20 +57,13 @@ export function RecordingBrowser({
 
   useEffect(() => {
     if (!selectedRecording) {
-      setDraft({
-        name: "",
-        notes: "",
-        measureStart: "",
-        measureEnd: "",
-        referenceId: "",
-      });
+      setDraft({ name: "", notes: "", segmentId: "", referenceId: "" });
       return;
     }
     setDraft({
       name: selectedRecording.name,
       notes: selectedRecording.notes ?? "",
-      measureStart: selectedRecording.measureStart?.toString() ?? "",
-      measureEnd: selectedRecording.measureEnd?.toString() ?? "",
+      segmentId: selectedRecording.segmentId ?? "",
       referenceId: selectedRecording.referenceId ?? "",
     });
   }, [selectedRecording]);
@@ -80,6 +71,10 @@ export function RecordingBrowser({
   const referenceLookup = useMemo(() => {
     return new Map(references.map((reference) => [reference.id, reference.name]));
   }, [references]);
+
+  const segmentLookup = useMemo(() => {
+    return new Map(segments.map((segment) => [segment.id, segment.name]));
+  }, [segments]);
 
   const filteredRecordings = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -102,38 +97,25 @@ export function RecordingBrowser({
         return true;
       }
       const referenceName = recording.referenceId ? referenceLookup.get(recording.referenceId) ?? "" : "";
-      const haystack = [
-        recording.name,
-        recording.notes ?? "",
-        recording.fileName,
-        recording.createdAt,
-        recording.recordedAt,
-        formatMeasureRange(recording.measureStart, recording.measureEnd),
-        referenceName,
-      ]
+      const segmentName = recording.segmentId ? segmentLookup.get(recording.segmentId) ?? "" : "";
+      const haystack = [recording.name, recording.notes ?? "", recording.fileName, recording.createdAt, recording.recordedAt, segmentName, referenceName]
         .join(" ")
         .toLowerCase();
       return haystack.includes(query);
     });
-  }, [recordings, referenceLookup, search, sortBy]);
+  }, [recordings, referenceLookup, segmentLookup, search, sortBy]);
 
   const groupedRecordings = useMemo<GroupedRecordings[]>(() => {
     const groups = new Map<string, RecordingAttempt[]>();
     for (const recording of filteredRecordings) {
-      const key = getGroupKey(recording, groupBy, projectName, referenceLookup);
+      const key = getGroupKey(recording, groupBy, referenceLookup, segmentLookup);
       const items = groups.get(key) ?? [];
       items.push(recording);
       groups.set(key, items);
     }
 
-    const order = [...groups.entries()].map(([key, items]) => ({
-      key,
-      label: getGroupLabel(items[0] ?? null, groupBy, projectName, referenceLookup),
-      items,
-    }));
-
-    return order;
-  }, [filteredRecordings, groupBy, projectName, referenceLookup]);
+    return [...groups.entries()].map(([key, items]) => ({ key, label: key, items }));
+  }, [filteredRecordings, groupBy, referenceLookup, segmentLookup]);
 
   const quickCompareOptions = useMemo(() => {
     return [
@@ -145,7 +127,7 @@ export function RecordingBrowser({
   }, [recordings]);
 
   return (
-    <section className="panel recording-browser">
+    <section className="panel recording-browser" data-tour-id="recording-browser">
       <div className="panel__header">
         <div>
           <h2>Recording Browser</h2>
@@ -168,17 +150,16 @@ export function RecordingBrowser({
       <div className="recording-browser__toolbar">
         <input
           className="text-input text-input--wide"
-          placeholder="Search titles, notes, measure ranges, or references"
+          placeholder="Search titles, notes, segments, or references"
           value={search}
           onChange={(event) => setSearch(event.target.value)}
         />
         <label className="field-inline field-inline--compact">
           Group
           <select className="text-input" value={groupBy} onChange={(event) => setGroupBy(event.target.value as GroupBy)}>
+            <option value="segment">Segment</option>
             <option value="date">Date</option>
-            <option value="measure">Measure Range</option>
             <option value="reference">Reference</option>
-            <option value="project">Project</option>
           </select>
         </label>
         <label className="field-inline field-inline--compact">
@@ -220,7 +201,8 @@ export function RecordingBrowser({
                         {recording.id === selectedRecording?.id ? <span className="pill">Selected</span> : null}
                       </div>
                       <p className="muted">
-                        {formatDateTime(recording.createdAt)} · {formatMeasureRange(recording.measureStart, recording.measureEnd)}
+                        {formatDateTime(recording.createdAt)} ·{" "}
+                        {recording.segmentId ? segmentLookup.get(recording.segmentId) ?? "Unknown segment" : "No segment"}
                       </p>
                       <p className="muted">
                         {formatDuration(recording.durationMs)} · {referenceLookup.get(recording.referenceId ?? "") ?? "No reference"}
@@ -275,26 +257,21 @@ export function RecordingBrowser({
                     placeholder="Add listening notes or take notes here."
                   />
                 </label>
-                <div className="two-up">
-                  <label>
-                    Measure start
-                    <input
-                      className="text-input"
-                      type="number"
-                      value={draft.measureStart}
-                      onChange={(event) => setDraft({ ...draft, measureStart: event.target.value })}
-                    />
-                  </label>
-                  <label>
-                    Measure end
-                    <input
-                      className="text-input"
-                      type="number"
-                      value={draft.measureEnd}
-                      onChange={(event) => setDraft({ ...draft, measureEnd: event.target.value })}
-                    />
-                  </label>
-                </div>
+                <label>
+                  Segment
+                  <select
+                    className="text-input"
+                    value={draft.segmentId}
+                    onChange={(event) => setDraft({ ...draft, segmentId: event.target.value })}
+                  >
+                    <option value="">None</option>
+                    {segments.map((segment) => (
+                      <option key={segment.id} value={segment.id}>
+                        {segment.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <label>
                   Active reference
                   <select
@@ -311,10 +288,7 @@ export function RecordingBrowser({
                   </select>
                 </label>
                 <div className="transport-row">
-                  <button
-                    className="primary-btn"
-                    onClick={() => onSaveRecording(selectedRecording.id, draft)}
-                  >
+                  <button className="primary-btn" onClick={() => onSaveRecording(selectedRecording.id, draft)}>
                     Save Changes
                   </button>
                   <button className="secondary-btn" onClick={() => onSelectRecording(selectedRecording.id)}>
@@ -335,38 +309,14 @@ export function RecordingBrowser({
 function getGroupKey(
   recording: RecordingAttempt,
   groupBy: GroupBy,
-  projectName: string,
   referenceLookup: Map<string, string>,
+  segmentLookup: Map<string, string>,
 ): string {
   switch (groupBy) {
-    case "measure":
-      return formatMeasureRange(recording.measureStart, recording.measureEnd);
+    case "segment":
+      return recording.segmentId ? segmentLookup.get(recording.segmentId) ?? "Unknown segment" : "No segment";
     case "reference":
       return recording.referenceId ? referenceLookup.get(recording.referenceId) ?? "Unknown reference" : "No reference";
-    case "project":
-      return projectName;
-    case "date":
-    default:
-      return formatDay(recording.createdAt);
-  }
-}
-
-function getGroupLabel(
-  recording: RecordingAttempt | null,
-  groupBy: GroupBy,
-  projectName: string,
-  referenceLookup: Map<string, string>,
-): string {
-  if (!recording) {
-    return "Recordings";
-  }
-  switch (groupBy) {
-    case "measure":
-      return formatMeasureRange(recording.measureStart, recording.measureEnd);
-    case "reference":
-      return recording.referenceId ? referenceLookup.get(recording.referenceId) ?? "Unknown reference" : "No reference";
-    case "project":
-      return projectName;
     case "date":
     default:
       return formatDay(recording.createdAt);
@@ -414,22 +364,6 @@ function formatDuration(value: number | null): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
-}
-
-function formatMeasureRange(start: number | null, end: number | null): string {
-  if (start == null && end == null) {
-    return "Unmapped";
-  }
-  if (start == null) {
-    return `Up to M${end}`;
-  }
-  if (end == null) {
-    return `From M${start}`;
-  }
-  if (start === end) {
-    return `M${start}`;
-  }
-  return `M${start} - M${end}`;
 }
 
 function startOfDay(date: Date): Date {

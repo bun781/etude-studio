@@ -9,7 +9,7 @@ type Props = {
 
 export function ProjectLibrary({ projects, selectedProjectId, onSelectProject, onOpenProject }: Props) {
   return (
-    <section className="panel">
+    <section className="panel" data-tour-id="project-library">
       <div className="panel__header">
         <h2>Project Library</h2>
         <p className="muted">{projects.length} local project{projects.length === 1 ? "" : "s"}</p>
@@ -36,4 +36,3 @@ export function ProjectLibrary({ projects, selectedProjectId, onSelectProject, o
     </section>
   );
 }
-
