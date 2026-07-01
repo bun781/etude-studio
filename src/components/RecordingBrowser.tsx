@@ -14,6 +14,7 @@ type Props = {
   segments: PracticeSegment[];
   selectedRecordingId: string | null;
   onSelectRecording: (recordingId: string) => void;
+  onListenRecording: (recordingId: string) => void;
   onSaveRecording: (recordingId: string, draft: RecordingDraft) => void;
   onDeleteRecording: (recordingId: string) => void;
   onDuplicateRecording: (recordingId: string) => void;
@@ -35,6 +36,7 @@ export function RecordingBrowser({
   segments,
   selectedRecordingId,
   onSelectRecording,
+  onListenRecording,
   onSaveRecording,
   onDeleteRecording,
   onDuplicateRecording,
@@ -209,7 +211,7 @@ export function RecordingBrowser({
                       </p>
                       {recording.notes ? <p>{recording.notes}</p> : <p className="muted">No notes yet.</p>}
                       <div className="transport-row recording-card__actions">
-                        <button className="secondary-btn" onClick={() => onSelectRecording(recording.id)}>
+                        <button className="secondary-btn" onClick={() => onListenRecording(recording.id)}>
                           Listen
                         </button>
                         <button className="secondary-btn" onClick={() => onDuplicateRecording(recording.id)}>
@@ -291,7 +293,7 @@ export function RecordingBrowser({
                   <button className="primary-btn" onClick={() => onSaveRecording(selectedRecording.id, draft)}>
                     Save Changes
                   </button>
-                  <button className="secondary-btn" onClick={() => onSelectRecording(selectedRecording.id)}>
+                  <button className="secondary-btn" onClick={() => onListenRecording(selectedRecording.id)}>
                     Listen
                   </button>
                 </div>

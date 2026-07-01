@@ -18,15 +18,18 @@ export function ProjectHeader({
   return (
     <header className="topbar">
       <div className="topbar__primary">
+        <div className="topbar__brand">
+          <img className="topbar__brand-mark" src="/app-icon.png" alt="" aria-hidden="true" />
+          <div>
+            <p className="eyebrow">Etude Studio</p>
+            <strong>Practice ledger</strong>
+          </div>
+        </div>
         <div>
           <p className="eyebrow">Current piece</p>
           <h1>{project?.name ?? "No project open"}</h1>
         </div>
-        {project ? (
-          <p className="muted">Stored at {project.rootPath}</p>
-        ) : (
-          <p className="muted">Create or open a local project to begin.</p>
-        )}
+        <p className="muted">{project ? "Project ready to edit." : "Create or open a local project to begin."}</p>
       </div>
       <div className="topbar__actions">
         <input

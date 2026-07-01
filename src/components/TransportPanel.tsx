@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type PointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import type { PracticeSegment, RecordingAttempt, ReferenceAsset } from "../lib/types";
 
 type BoundaryEdge = "start" | "end";
@@ -16,6 +16,7 @@ type Props = {
   activeSegmentRecordingCount: number;
   isLooping: boolean;
   activeSourceLabel: string;
+  isSourceLoading: boolean;
   compareMode: CompareMode;
   selectedReference: ReferenceAsset | null;
   selectedRecording: RecordingAttempt | null;
@@ -46,6 +47,7 @@ export function TransportPanel({
   activeSegmentRecordingCount,
   isLooping,
   activeSourceLabel,
+  isSourceLoading,
   compareMode,
   selectedReference,
   selectedRecording,
@@ -60,6 +62,9 @@ export function TransportPanel({
   onSetSegmentBoundary,
 }: Props) {
   const trackRef = useRef<HTMLDivElement | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const autoScrollVelocityRef = useRef(0);
+  const autoScrollFrameRef = useRef<number | null>(null);
   const [interaction, setInteraction] = useState<TimelineInteraction | null>(null);
   const [draftBoundary, setDraftBoundary] = useState<{ edge: BoundaryEdge; time: number } | null>(null);
 
@@ -96,9 +101,16 @@ export function TransportPanel({
     canEditTiming,
     compareMode,
     hasAudio,
+    isSourceLoading,
     isDragging: interaction?.kind === "boundary",
     selectedReference,
   });
+
+  useEffect(() => {
+    return () => {
+      stopAutoScroll();
+    };
+  }, []);
 
   function timeFromPointer(event: PointerEvent<HTMLElement>): number {
     const track = trackRef.current;
@@ -118,6 +130,7 @@ export function TransportPanel({
     onSeek(time);
     setInteraction({ kind: "seek", pointerId: event.pointerId });
     event.currentTarget.setPointerCapture(event.pointerId);
+    updateAutoScroll(event.clientX);
   }
 
   function beginBoundaryDrag(edge: BoundaryEdge, event: PointerEvent<HTMLButtonElement>) {
@@ -129,12 +142,14 @@ export function TransportPanel({
     setDraftBoundary({ edge, time: startingTime });
     setInteraction({ kind: "boundary", edge, pointerId: event.pointerId });
     trackRef.current?.setPointerCapture(event.pointerId);
+    updateAutoScroll(event.clientX);
   }
 
   function continueInteraction(event: PointerEvent<HTMLDivElement>) {
     if (!interaction || interaction.pointerId !== event.pointerId) {
       return;
     }
+    updateAutoScroll(event.clientX);
     const time = timeFromPointer(event);
     if (interaction.kind === "seek") {
       onSeek(time);
@@ -147,6 +162,7 @@ export function TransportPanel({
     if (!interaction || interaction.pointerId !== event.pointerId) {
       return;
     }
+    stopAutoScroll();
     if (interaction.kind === "boundary" && draftBoundary) {
       onSetSegmentBoundary(interaction.edge, draftBoundary.time);
     }
@@ -155,6 +171,55 @@ export function TransportPanel({
     }
     setInteraction(null);
     setDraftBoundary(null);
+  }
+
+  function updateAutoScroll(pointerClientX: number) {
+    const viewport = viewportRef.current;
+    if (!viewport || !interaction) {
+      stopAutoScroll();
+      return;
+    }
+    const bounds = viewport.getBoundingClientRect();
+    const threshold = 56;
+    const maxVelocity = 20;
+    let velocity = 0;
+
+    if (pointerClientX < bounds.left + threshold) {
+      const intensity = clamp((bounds.left + threshold - pointerClientX) / threshold, 0, 1);
+      velocity = -Math.max(4, Math.round(maxVelocity * intensity));
+    } else if (pointerClientX > bounds.right - threshold) {
+      const intensity = clamp((pointerClientX - (bounds.right - threshold)) / threshold, 0, 1);
+      velocity = Math.max(4, Math.round(maxVelocity * intensity));
+    }
+
+    autoScrollVelocityRef.current = velocity;
+    if (velocity === 0) {
+      stopAutoScroll();
+      return;
+    }
+    if (autoScrollFrameRef.current != null) {
+      return;
+    }
+
+    const tick = () => {
+      const currentViewport = viewportRef.current;
+      if (!currentViewport || autoScrollVelocityRef.current === 0 || !interaction) {
+        autoScrollFrameRef.current = null;
+        return;
+      }
+      currentViewport.scrollLeft += autoScrollVelocityRef.current;
+      autoScrollFrameRef.current = window.requestAnimationFrame(tick);
+    };
+
+    autoScrollFrameRef.current = window.requestAnimationFrame(tick);
+  }
+
+  function stopAutoScroll() {
+    autoScrollVelocityRef.current = 0;
+    if (autoScrollFrameRef.current != null) {
+      window.cancelAnimationFrame(autoScrollFrameRef.current);
+      autoScrollFrameRef.current = null;
+    }
   }
 
   return (
@@ -207,10 +272,11 @@ export function TransportPanel({
           <div className="timeline__readout">
             <span>{formatTime(currentTime)}</span>
             <span>{formatTime(duration)}</span>
+            {isSourceLoading ? <span className="timeline__loading">Loading audio...</span> : null}
           </div>
         </div>
 
-        <div className="timeline__viewport">
+        <div ref={viewportRef} className="timeline__viewport">
           <div
             ref={trackRef}
             className="timeline__rail"
@@ -294,8 +360,14 @@ export function TransportPanel({
       </div>
 
       <div className="transport-row">
-        <button className="primary-btn" data-tour-id="play-button" onClick={onPlayPause} disabled={!hasAudio}>
-          {isPlaying ? "Pause" : "Play"}
+        <button
+          className={isPlaying ? "primary-btn primary-btn--active" : "primary-btn"}
+          data-tour-id="play-button"
+          onClick={onPlayPause}
+          disabled={!hasAudio && !isSourceLoading}
+          aria-pressed={isPlaying}
+        >
+          Play
         </button>
         <button className="secondary-btn" onClick={onStop} disabled={!hasAudio}>
           Stop
@@ -406,6 +478,7 @@ function getTimelineHint({
   canEditTiming,
   compareMode,
   hasAudio,
+  isSourceLoading,
   isDragging,
   selectedReference,
 }: {
@@ -413,6 +486,7 @@ function getTimelineHint({
   canEditTiming: boolean;
   compareMode: CompareMode;
   hasAudio: boolean;
+  isSourceLoading: boolean;
   isDragging: boolean;
   selectedReference: ReferenceAsset | null;
 }) {
@@ -424,6 +498,9 @@ function getTimelineHint({
   }
   if (!selectedReference) {
     return "Import a reference recording to align this passage";
+  }
+  if (isSourceLoading) {
+    return compareMode === "recording" ? "Recording audio is loading" : "Reference audio is loading";
   }
   if (!hasAudio) {
     return "Reference audio is loading";

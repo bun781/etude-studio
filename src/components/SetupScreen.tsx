@@ -100,6 +100,16 @@ export function SetupScreen({
     return map;
   }, [segments]);
 
+  const selectedSegmentIndex = useMemo(() => {
+    if (!selectedSegmentId) {
+      return -1;
+    }
+    return segments.findIndex((segment) => segment.id === selectedSegmentId);
+  }, [segments, selectedSegmentId]);
+  const selectedSegment = selectedSegmentIndex >= 0 ? segments[selectedSegmentIndex] : null;
+  const canGoPreviousSegment = selectedSegmentIndex > 0;
+  const canGoNextSegment = selectedSegmentIndex >= 0 && selectedSegmentIndex < segments.length - 1;
+
   function handleMark(point: NormalizedPoint) {
     if (!draftStart) {
       setDraftStart({ page, point });
@@ -129,6 +139,20 @@ export function SetupScreen({
     setDraftName(segment.name);
     setPage(segment.startPage);
     setShowGrid(false);
+  }
+
+  function handlePreviousSegment() {
+    if (!canGoPreviousSegment) {
+      return;
+    }
+    onSelectSegment(segments[selectedSegmentIndex - 1].id);
+  }
+
+  function handleNextSegment() {
+    if (!canGoNextSegment) {
+      return;
+    }
+    onSelectSegment(segments[selectedSegmentIndex + 1].id);
   }
 
   function confirmDraft() {
@@ -311,7 +335,6 @@ export function SetupScreen({
               value={projectNameDraft}
               onChange={(event) => setProjectNameDraft(event.target.value)}
             />
-            <p className="muted">{project.rootPath}</p>
             <div className="bookmark-actions">
               <button className="secondary-btn" onClick={onRenameProject}>
                 Rename
@@ -351,19 +374,44 @@ export function SetupScreen({
             {segments.length === 0 ? (
               <p className="muted">No segments yet. Click two corners on the score to highlight one.</p>
             ) : (
-              segments.map((segment) => (
-                <SegmentEditorCard
-                  key={segment.id}
-                  segment={segment}
-                  number={segmentNumbers.get(segment.id) ?? 0}
-                  references={references}
-                  isActive={segment.id === selectedSegmentId}
-                  onSelect={() => onSelectSegment(segment.id)}
-                  onPatch={(patch) => onUpdateSegment(segment.id, patch)}
-                  onDelete={() => onDeleteSegment(segment.id)}
-                  onEditAnnotation={() => startEditingAnnotation(segment)}
-                />
-              ))
+              <>
+                <div className="segment-pager" aria-label="Segment navigation">
+                  <button
+                    className="secondary-btn segment-pager__arrow"
+                    onClick={handlePreviousSegment}
+                    disabled={!canGoPreviousSegment}
+                    aria-label="Previous segment"
+                  >
+                    ←
+                  </button>
+                  <span className="segment-pager__count muted">
+                    Segment {selectedSegmentIndex >= 0 ? selectedSegmentIndex + 1 : "-"} of {segments.length}
+                  </span>
+                  <button
+                    className="secondary-btn segment-pager__arrow"
+                    onClick={handleNextSegment}
+                    disabled={!canGoNextSegment}
+                    aria-label="Next segment"
+                  >
+                    →
+                  </button>
+                </div>
+                {selectedSegment ? (
+                  <SegmentEditorCard
+                    key={selectedSegment.id}
+                    segment={selectedSegment}
+                    number={segmentNumbers.get(selectedSegment.id) ?? 0}
+                    references={references}
+                    isActive
+                    onSelect={() => onSelectSegment(selectedSegment.id)}
+                    onPatch={(patch) => onUpdateSegment(selectedSegment.id, patch)}
+                    onDelete={() => onDeleteSegment(selectedSegment.id)}
+                    onEditAnnotation={() => startEditingAnnotation(selectedSegment)}
+                  />
+                ) : (
+                  <p className="muted">Select a segment to edit it here.</p>
+                )}
+              </>
             )}
           </div>
         </section>

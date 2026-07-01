@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { ProjectHeader } from "./components/ProjectHeader";
 import { ProjectLibrary } from "./components/ProjectLibrary";
 import { SetupScreen, type SegmentCreateDraft, type SegmentPatch } from "./components/SetupScreen";
 import { PracticeScreen } from "./components/PracticeScreen";
@@ -61,14 +60,37 @@ const DEFAULT_PREFERENCES: StoredPreferences = {
   timelineZoom: 1,
 };
 
+type SegmentTimingSnapshot = {
+  referenceId: string | null;
+  referenceStartMs: number | null;
+  referenceEndMs: number | null;
+};
+
+type SegmentTimingHistoryEntry = {
+  segmentId: string;
+  before: SegmentTimingSnapshot;
+  after: SegmentTimingSnapshot;
+};
+
+type RecordingFormat = {
+  extension: string;
+  mimeType?: string;
+};
+
 function App() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const autoplayOnLoadRef = useRef(false);
+  const pendingAutoplayRef = useRef(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
   const recordingStartedAtMsRef = useRef<number | null>(null);
   const activeSegmentIdRef = useRef<string | null>(null);
+  const timingHistoryRef = useRef<{ past: SegmentTimingHistoryEntry[]; future: SegmentTimingHistoryEntry[] }>({
+    past: [],
+    future: [],
+  });
+  const audioLoadRequestRef = useRef(0);
+  const requestedSourceKeyRef = useRef<string | null>(null);
   const noteSaveTimerRef = useRef<number | null>(null);
   const lastSavedNoteRef = useRef<{ projectId: string | null; text: string }>({
     projectId: null,
@@ -90,15 +112,24 @@ function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [compareMode, setCompareMode] = useState<CompareMode>(preferences.compareMode);
   const [isRecording, setIsRecording] = useState(false);
+  const [isSourceLoading, setIsSourceLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Ready.");
   const [timelineZoom, setTimelineZoom] = useState(preferences.timelineZoom);
   const [activeView, setActiveView] = useState<AppView>("library");
   const [isTutorialOpen, setIsTutorialOpen] = useState(false);
   const [tutorialStepIndex, setTutorialStepIndex] = useState(0);
+  const [pdfSrc, setPdfSrc] = useState<string | null>(null);
+  const [, setTimingHistoryVersion] = useState(0);
+  const currentSource = project ? resolveSource(project, compareMode) : null;
 
   useEffect(() => {
     activeSegmentIdRef.current = activeSegmentId;
   }, [activeSegmentId]);
+
+  useEffect(() => {
+    timingHistoryRef.current = { past: [], future: [] };
+    setTimingHistoryVersion((value) => value + 1);
+  }, [project?.project.id]);
 
   useEffect(() => {
     void refreshProjects();
@@ -201,6 +232,29 @@ function App() {
   }, [noteText, project]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    const score = project?.score;
+    if (!project || !score) {
+      setPdfSrc(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    void (async () => {
+      const absolutePath = await joinPath(project.project.rootPath, score.relativePath);
+      if (!cancelled) {
+        setPdfSrc(toFileSrc(absolutePath));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [project?.project.rootPath, project?.score?.relativePath]);
+
+  useEffect(() => {
     const audio = audioRef.current;
     if (!audio) {
       return;
@@ -208,9 +262,17 @@ function App() {
 
     const handleLoadedMetadata = () => {
       setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
-      if (autoplayOnLoadRef.current) {
-        autoplayOnLoadRef.current = false;
-        void audio.play();
+    };
+    const handleCanPlay = () => {
+      if (!requestedSourceKeyRef.current) {
+        return;
+      }
+      setIsSourceLoading(false);
+      if (pendingAutoplayRef.current) {
+        pendingAutoplayRef.current = false;
+        void audio.play().catch((error: unknown) => {
+          setStatusMessage(error instanceof Error ? error.message : "Playback could not start.");
+        });
       }
     };
     const handlePlay = () => setIsPlaying(true);
@@ -238,45 +300,78 @@ function App() {
       }
     };
     const handleEnded = () => setIsPlaying(false);
+    const handleError = () => {
+      setIsSourceLoading(false);
+      pendingAutoplayRef.current = false;
+      setStatusMessage("Audio could not load.");
+    };
 
     audio.addEventListener("loadedmetadata", handleLoadedMetadata);
+    audio.addEventListener("canplay", handleCanPlay);
     audio.addEventListener("play", handlePlay);
     audio.addEventListener("pause", handlePause);
     audio.addEventListener("timeupdate", handleTimeUpdate);
     audio.addEventListener("ended", handleEnded);
+    audio.addEventListener("error", handleError);
 
     return () => {
       audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
+      audio.removeEventListener("canplay", handleCanPlay);
       audio.removeEventListener("play", handlePlay);
       audio.removeEventListener("pause", handlePause);
       audio.removeEventListener("timeupdate", handleTimeUpdate);
       audio.removeEventListener("ended", handleEnded);
+      audio.removeEventListener("error", handleError);
     };
   }, [project, compareMode, isLooping]);
 
   useEffect(() => {
     const audio = audioRef.current;
-    if (!audio || !project) {
+    if (!audio) {
       return;
     }
 
-    const source = resolveSource(project, compareMode);
-    if (!source) {
+    audio.playbackRate = clampPlaybackRate(playbackRate);
+    if ("preservesPitch" in audio) {
+      audio.preservesPitch = true;
+    }
+  }, [playbackRate]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || !project) {
+      setIsSourceLoading(false);
+      requestedSourceKeyRef.current = null;
+      pendingAutoplayRef.current = false;
+      return;
+    }
+
+    if (!currentSource) {
       audio.removeAttribute("src");
       audio.load();
       setDuration(0);
       setCurrentTime(0);
+      setIsSourceLoading(false);
+      requestedSourceKeyRef.current = null;
+      pendingAutoplayRef.current = false;
       return;
     }
 
+    const sourceKey = getAudioSourceKey(compareMode, currentSource.id, currentSource.relativePath);
+    requestedSourceKeyRef.current = sourceKey;
+    setIsSourceLoading(true);
+    setDuration(0);
+    setCurrentTime(0);
+    setIsPlaying(false);
+    const requestId = ++audioLoadRequestRef.current;
     let cancelled = false;
     void (async () => {
-      const absolutePath = await joinPath(project.project.rootPath, source.relativePath);
-      if (cancelled) {
+      const absolutePath = await joinPath(project.project.rootPath, currentSource.relativePath);
+      if (cancelled || requestId !== audioLoadRequestRef.current) {
         return;
       }
       audio.src = toFileSrc(absolutePath);
-      audio.playbackRate = playbackRate;
+      audio.playbackRate = clampPlaybackRate(playbackRate);
       if ("preservesPitch" in audio) {
         audio.preservesPitch = true;
       }
@@ -286,7 +381,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [project, compareMode, playbackRate]);
+  }, [compareMode, currentSource?.id, currentSource?.relativePath, project?.project.rootPath]);
 
   useEffect(() => {
     if (!project) {
@@ -328,6 +423,50 @@ function App() {
       cancelled = true;
     };
   }, [activeSegmentId, activeView, compareMode, project]);
+
+  useEffect(() => {
+    function handleKeydown(event: KeyboardEvent) {
+      if (shouldIgnoreShortcutTarget(event.target)) {
+        return;
+      }
+
+      if (activeView === "practice") {
+        if (event.key === "ArrowLeft") {
+          event.preventDefault();
+          handlePrevSegment();
+          return;
+        }
+        if (event.key === "ArrowRight") {
+          event.preventDefault();
+          handleNextSegment();
+          return;
+        }
+        if (event.key === " ") {
+          event.preventDefault();
+          void handlePlayPause();
+          return;
+        }
+      }
+
+      if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+        const lowerKey = event.key.toLowerCase();
+        if (lowerKey === "z" && !event.shiftKey) {
+          event.preventDefault();
+          void handleUndoTimingEdit();
+          return;
+        }
+        if (lowerKey === "y" || (lowerKey === "z" && event.shiftKey)) {
+          event.preventDefault();
+          void handleRedoTimingEdit();
+        }
+      }
+    }
+
+    window.addEventListener("keydown", handleKeydown);
+    return () => {
+      window.removeEventListener("keydown", handleKeydown);
+    };
+  }, [activeView, compareMode, project, activeSegmentId, duration, isSourceLoading, playbackRate]);
 
   useEffect(() => {
     if (!isTutorialOpen) {
@@ -399,22 +538,41 @@ function App() {
     await openProjectById(renamed.id);
   }
 
+  async function deleteProjectById(projectId: string) {
+    const targetProject = project?.project.id === projectId ? project.project : projects.find((item) => item.id === projectId) ?? null;
+    if (!targetProject) {
+      return;
+    }
+    const confirmDelete = window.confirm(`Delete ${targetProject.name}? This removes the local project folder.`);
+    if (!confirmDelete) {
+      return;
+    }
+    if (project?.project.id === projectId) {
+      await endPracticeSession({ projectId });
+    }
+    await deleteProject({ projectId });
+    if (project?.project.id === projectId) {
+      setProject(null);
+      setProjectNameDraft("");
+      setNoteText("");
+      setActiveSegmentId(null);
+      setCurrentTime(0);
+      setDuration(0);
+      setIsLooping(false);
+      setIsPlaying(false);
+      setCompareMode("reference");
+      pendingAutoplayRef.current = false;
+    }
+    setActiveView("library");
+    await refreshProjects();
+    setStatusMessage("Project deleted.");
+  }
+
   async function deleteCurrentProject() {
     if (!project) {
       return;
     }
-    const confirmDelete = window.confirm(`Delete ${project.project.name}? This removes the local project folder.`);
-    if (!confirmDelete) {
-      return;
-    }
-    await endPracticeSession({ projectId: project.project.id });
-    await deleteProject({ projectId: project.project.id });
-    setProject(null);
-    setSelectedProjectId(null);
-    setProjectNameDraft("");
-    setActiveView("library");
-    await refreshProjects();
-    setStatusMessage("Project deleted.");
+    await deleteProjectById(project.project.id);
   }
 
   async function handleImportScore() {
@@ -481,6 +639,7 @@ function App() {
     if (!project) {
       return;
     }
+    pendingAutoplayRef.current = false;
     const detail = await setActiveRecording(project.project.id, recordingId);
     setProject(detail);
     setCompareMode("recording");
@@ -491,7 +650,7 @@ function App() {
     if (!project) {
       return;
     }
-    autoplayOnLoadRef.current = true;
+    pendingAutoplayRef.current = true;
     const detail = await setActiveRecording(project.project.id, recordingId);
     setProject(detail);
     setCompareMode("recording");
@@ -616,6 +775,39 @@ function App() {
     setProject(detail);
   }
 
+  async function handleSegmentTimingChange(
+    segmentId: string,
+    nextTiming: SegmentTimingSnapshot,
+    options?: { skipHistory?: boolean; statusMessage?: string },
+  ) {
+    if (!project?.score) {
+      return;
+    }
+    const existing = project.score.segments.find((segment) => segment.id === segmentId);
+    if (!existing) {
+      return;
+    }
+
+    const before = getSegmentTimingSnapshot(existing);
+    if (isSameTimingSnapshot(before, nextTiming)) {
+      return;
+    }
+
+    await handleUpdateSegment(segmentId, nextTiming);
+
+    if (!options?.skipHistory) {
+      timingHistoryRef.current = {
+        past: [...timingHistoryRef.current.past, { segmentId, before, after: nextTiming }],
+        future: [],
+      };
+      setTimingHistoryVersion((value) => value + 1);
+    }
+
+    if (options?.statusMessage) {
+      setStatusMessage(options.statusMessage);
+    }
+  }
+
   async function handleDeleteSegment(segmentId: string) {
     if (!project) {
       return;
@@ -677,8 +869,13 @@ function App() {
       return;
     }
     const patch = buildSegmentBoundaryPatch(segment, edge, Math.round(time * 1000), reference.id, duration);
-    void handleUpdateSegment(activeSegmentId, patch);
-    setStatusMessage(edge === "start" ? "Passage start aligned." : "Passage end aligned.");
+    void handleSegmentTimingChange(activeSegmentId, {
+      referenceId: patch.referenceId ?? segment.referenceId,
+      referenceStartMs: patch.referenceStartMs ?? segment.referenceStartMs,
+      referenceEndMs: patch.referenceEndMs ?? segment.referenceEndMs,
+    }, {
+      statusMessage: edge === "start" ? "Passage start aligned." : "Passage end aligned.",
+    });
   }
 
   function handleToggleLoop() {
@@ -695,7 +892,15 @@ function App() {
 
   async function handlePlayPause() {
     const audio = audioRef.current;
-    if (!audio || !audio.src) {
+    if (!audio) {
+      return;
+    }
+    if (isSourceLoading) {
+      pendingAutoplayRef.current = true;
+      setStatusMessage("Audio is loading...");
+      return;
+    }
+    if (!audio.src) {
       setStatusMessage("Import a reference or recording before playback.");
       return;
     }
@@ -748,6 +953,46 @@ function App() {
     setCurrentTime(audio.currentTime);
   }
 
+  async function handleUndoTimingEdit() {
+    if (activeView !== "practice") {
+      return;
+    }
+    const entry = timingHistoryRef.current.past[timingHistoryRef.current.past.length - 1];
+    if (!entry) {
+      return;
+    }
+    await handleSegmentTimingChange(entry.segmentId, entry.before, { skipHistory: true });
+    timingHistoryRef.current = {
+      past: timingHistoryRef.current.past.slice(0, -1),
+      future: [entry, ...timingHistoryRef.current.future],
+    };
+    setTimingHistoryVersion((value) => value + 1);
+    if (entry.segmentId !== activeSegmentIdRef.current) {
+      setActiveSegmentId(entry.segmentId);
+    }
+    setStatusMessage("Timing change undone.");
+  }
+
+  async function handleRedoTimingEdit() {
+    if (activeView !== "practice") {
+      return;
+    }
+    const [entry, ...remainingFuture] = timingHistoryRef.current.future;
+    if (!entry) {
+      return;
+    }
+    await handleSegmentTimingChange(entry.segmentId, entry.after, { skipHistory: true });
+    timingHistoryRef.current = {
+      past: [...timingHistoryRef.current.past, entry],
+      future: remainingFuture,
+    };
+    setTimingHistoryVersion((value) => value + 1);
+    if (entry.segmentId !== activeSegmentIdRef.current) {
+      setActiveSegmentId(entry.segmentId);
+    }
+    setStatusMessage("Timing change restored.");
+  }
+
   async function handleToggleRecording() {
     if (isRecording) {
       recorderRef.current?.stop();
@@ -762,7 +1007,10 @@ function App() {
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
+      const recordingFormat = selectRecordingFormat();
+      const recorder = recordingFormat.mimeType
+        ? new MediaRecorder(stream, { mimeType: recordingFormat.mimeType })
+        : new MediaRecorder(stream);
       recorderRef.current = recorder;
       streamRef.current = stream;
       chunksRef.current = [];
@@ -782,8 +1030,9 @@ function App() {
 
       recorder.onstop = async () => {
         const chunks = chunksRef.current.slice();
-        const mimeType = recorder.mimeType || "audio/webm";
-        const fileName = `take-${startedAt.replace(/[:.]/g, "-")}.webm`;
+        const mimeType = recorder.mimeType || recordingFormat.mimeType || "audio/webm";
+        const extension = getRecordingExtension(mimeType, recordingFormat.extension);
+        const fileName = `take-${startedAt.replace(/[:.]/g, "-")}.${extension}`;
         const relativePath = await joinPath("recordings", fileName);
         const absolutePath = await joinPath(project.project.rootPath, relativePath);
         const blob = new Blob(chunks, { type: mimeType });
@@ -809,10 +1058,12 @@ function App() {
           detail.recordings.find((recording) => recording.recordedAt === startedAt && recording.fileName === fileName) ??
           detail.recordings[0];
         if (savedRecording) {
+          pendingAutoplayRef.current = true;
           const activeDetail = await setActiveRecording(detail.project.id, savedRecording.id);
           setProject(activeDetail);
+          setCompareMode("recording");
         }
-        setStatusMessage("Recording saved.");
+        setStatusMessage("Recording saved. Loading playback...");
       };
 
       recorder.start();
@@ -838,8 +1089,6 @@ function App() {
   const activeSegmentRecordings = activeSegment
     ? project?.recordings.filter((recording) => recording.segmentId === activeSegment.id) ?? []
     : [];
-  const pdfSrc =
-    project?.score != null ? toFileSrc(`${project.project.rootPath}/${project.score.relativePath}`) : null;
 
   const transport = project ? (
     <TransportPanel
@@ -854,6 +1103,7 @@ function App() {
       activeSegmentRecordingCount={activeSegmentRecordings.length}
       isLooping={isLooping}
       activeSourceLabel={resolveSourceLabel(project, compareMode)}
+      isSourceLoading={isSourceLoading}
       compareMode={compareMode}
       selectedReference={resolveReference(project)}
       selectedRecording={resolveRecording(project)}
@@ -861,9 +1111,13 @@ function App() {
       onStop={handleStop}
       onSeek={handleSeek}
       onSpeedChange={(value) => {
-        setPlaybackRate(value);
+        if (!Number.isFinite(value)) {
+          return;
+        }
+        const nextRate = clampPlaybackRate(value);
+        setPlaybackRate(nextRate);
         if (audioRef.current) {
-          audioRef.current.playbackRate = value;
+          audioRef.current.playbackRate = nextRate;
           if ("preservesPitch" in audioRef.current) {
             audioRef.current.preservesPitch = true;
           }
@@ -880,9 +1134,10 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="app-nav" aria-label="Primary navigation">
+        <span className="app-nav__handle">Menu</span>
         <div className="brand-lockup" data-tour-id="brand">
-          <span className="brand-mark">ES</span>
-          <div>
+          <img className="brand-mark" src="/app-icon.png" alt="" aria-hidden="true" />
+          <div className="brand-lockup__text">
             <p className="eyebrow">Etude Studio</p>
             <strong>Practice ledger</strong>
           </div>
@@ -917,34 +1172,24 @@ function App() {
 
       <main className="app-main">
         {activeView === "library" ? (
-          <>
-            <ProjectHeader
-              project={project?.project ?? null}
+          <section className="screen">
+            <ProjectLibrary
+              projects={projects}
+              selectedProjectId={selectedProjectId}
               projectNameDraft={projectNameDraft}
               setProjectNameDraft={setProjectNameDraft}
+              onSelectProject={setSelectedProjectId}
               onCreateProject={() => void createNewProject()}
-              onOpenProject={() => void openSelectedProject()}
+              onOpenProject={(projectId) => void openProjectById(projectId)}
+              onDeleteProject={(projectId) => void deleteProjectById(projectId)}
             />
-            <section className="screen">
-              <div className="page-intro">
-                <p className="eyebrow">Library</p>
-                <h1>The music shelf</h1>
-                <p className="lede">Pieces, etudes, and local folders arranged for deliberate work.</p>
-              </div>
-              <div className="metric-strip" data-tour-id="home-metrics">
-                <Metric label="Today" value={formatDuration(stats.todayMs)} />
-                <Metric label="This week" value={formatDuration(stats.weekMs)} />
-                <Metric label="Recordings" value={String(stats.recordingAttempts)} />
-                <Metric label="Segments" value={String(stats.segmentCount)} />
-              </div>
-              <ProjectLibrary
-                projects={projects}
-                selectedProjectId={selectedProjectId}
-                onSelectProject={setSelectedProjectId}
-                onOpenProject={(projectId) => void openProjectById(projectId)}
-              />
-            </section>
-          </>
+            <div className="metric-strip" data-tour-id="home-metrics">
+              <Metric label="Today" value={formatDuration(stats.todayMs)} />
+              <Metric label="This week" value={formatDuration(stats.weekMs)} />
+              <Metric label="Recordings" value={String(stats.recordingAttempts)} />
+              <Metric label="Segments" value={String(stats.segmentCount)} />
+            </div>
+          </section>
         ) : null}
 
         {activeView === "setup" ? (
@@ -1012,6 +1257,7 @@ function App() {
                 segments={segments}
                 selectedRecordingId={project.project.activeRecordingId ?? null}
                 onSelectRecording={(recordingId) => void handleSelectRecording(recordingId)}
+                onListenRecording={(recordingId) => void handlePlaySegmentRecording(recordingId)}
                 onSaveRecording={(recordingId, draft) => void handleSaveRecording(recordingId, draft)}
                 onDeleteRecording={(recordingId) => void handleDeleteRecording(recordingId)}
                 onDuplicateRecording={(recordingId) => void handleDuplicateRecording(recordingId)}
@@ -1249,6 +1495,78 @@ function resolveSourceLabel(project: ProjectDetail, compareMode: CompareMode): s
     return "No playback source selected.";
   }
   return compareMode === "reference" ? `Reference: ${source.name}` : `Recording: ${source.name}`;
+}
+
+function getAudioSourceKey(compareMode: CompareMode, id: string, relativePath: string): string {
+  return `${compareMode}:${id}:${relativePath}`;
+}
+
+function getSegmentTimingSnapshot(segment: PracticeSegment): SegmentTimingSnapshot {
+  return {
+    referenceId: segment.referenceId,
+    referenceStartMs: segment.referenceStartMs,
+    referenceEndMs: segment.referenceEndMs,
+  };
+}
+
+function isSameTimingSnapshot(left: SegmentTimingSnapshot, right: SegmentTimingSnapshot): boolean {
+  return (
+    left.referenceId === right.referenceId &&
+    left.referenceStartMs === right.referenceStartMs &&
+    left.referenceEndMs === right.referenceEndMs
+  );
+}
+
+function clampPlaybackRate(value: number): number {
+  return Math.round(clampNumber(value, 0.5, 2) * 100) / 100;
+}
+
+function selectRecordingFormat(): RecordingFormat {
+  if (typeof MediaRecorder === "undefined") {
+    return { extension: "webm" };
+  }
+
+  const candidates: RecordingFormat[] = [
+    { extension: "m4a", mimeType: "audio/mp4;codecs=mp4a.40.2" },
+    { extension: "m4a", mimeType: "audio/mp4" },
+    { extension: "webm", mimeType: "audio/webm;codecs=opus" },
+    { extension: "webm", mimeType: "audio/webm" },
+    { extension: "ogg", mimeType: "audio/ogg;codecs=opus" },
+    { extension: "ogg", mimeType: "audio/ogg" },
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate.mimeType && MediaRecorder.isTypeSupported(candidate.mimeType)) {
+      return candidate;
+    }
+  }
+
+  return { extension: "webm" };
+}
+
+function getRecordingExtension(mimeType: string, fallbackExtension: string): string {
+  const normalized = mimeType.toLowerCase();
+  if (normalized.includes("mp4") || normalized.includes("mpeg")) {
+    return "m4a";
+  }
+  if (normalized.includes("ogg")) {
+    return "ogg";
+  }
+  if (normalized.includes("wav")) {
+    return "wav";
+  }
+  if (normalized.includes("webm")) {
+    return "webm";
+  }
+  return fallbackExtension;
+}
+
+function shouldIgnoreShortcutTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  const tagName = target.tagName.toLowerCase();
+  return target.isContentEditable || tagName === "input" || tagName === "textarea" || tagName === "select";
 }
 
 function formatDuration(value: number): string {

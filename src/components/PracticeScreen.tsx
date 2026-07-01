@@ -27,7 +27,7 @@ type Props = {
 };
 
 const STATUS_OPTIONS = ["Needs Work", "In Progress", "Polished"];
-type PracticeSubtab = "passage" | "takes" | "notes";
+type PracticeSubtab = "passage" | "notes";
 
 export function PracticeScreen({
   pdfSrc,
@@ -52,6 +52,7 @@ export function PracticeScreen({
   const pageWindows = activeSegment ? getSegmentPageWindows(activeSegment) : [];
   const canGoPrev = activeSegmentIndex > 0;
   const canGoNext = activeSegmentIndex >= 0 && activeSegmentIndex < segments.length - 1;
+  const quickRecording = segmentRecordings.find((recording) => recording.id === activeRecordingId) ?? segmentRecordings[0] ?? null;
 
   useEffect(() => {
     setNoteDraft(activeSegment?.notes ?? "");
@@ -106,14 +107,6 @@ export function PracticeScreen({
             <button className="secondary-btn" onClick={onOpenSetup}>
               Setup
             </button>
-            <button
-              className={isRecording ? "danger-btn" : "primary-btn"}
-              data-tour-id="record-button"
-              onClick={onToggleRecording}
-              disabled={!activeSegment}
-            >
-              {isRecording ? "Stop Recording" : "Record"}
-            </button>
           </div>
 
           {activeSegment ? (
@@ -153,15 +146,6 @@ export function PracticeScreen({
           onClick={() => setActiveSubtab("passage")}
         >
           Passage
-        </button>
-        <button
-          className={activeSubtab === "takes" ? "practice-subtab practice-subtab--active" : "practice-subtab"}
-          type="button"
-          role="tab"
-          aria-selected={activeSubtab === "takes"}
-          onClick={() => setActiveSubtab("takes")}
-        >
-          Takes
         </button>
         <button
           className={activeSubtab === "notes" ? "practice-subtab practice-subtab--active" : "practice-subtab"}
@@ -206,41 +190,6 @@ export function PracticeScreen({
           </div>
         ) : null}
 
-        {activeSubtab === "takes" ? (
-          <section className="practice-tab-panel">
-            <div className="section-heading">
-              <div>
-                <h2>Takes</h2>
-                <p className="muted">{activeSegment?.name ?? "No passage selected"}</p>
-              </div>
-            </div>
-            {!activeSegment ? (
-              <div className="empty-state">Select a passage to review takes.</div>
-            ) : segmentRecordings.length === 0 ? (
-              <div className="empty-state">No takes for this passage yet.</div>
-            ) : (
-              <ul className="segment-recording-list">
-                {segmentRecordings.map((recording) => (
-                  <li key={recording.id} className="segment-recording-list__item">
-                    <span>
-                      {recording.name}
-                      {recording.id === activeRecordingId ? <span className="pill">Active</span> : null}
-                    </span>
-                    <div className="segment-recording-list__actions">
-                      <button className="secondary-btn" onClick={() => onPlayRecording(recording.id)}>
-                        Listen
-                      </button>
-                      <button className="link-btn" onClick={() => onDeleteRecording(recording.id)}>
-                        Remove
-                      </button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-        ) : null}
-
         {activeSubtab === "notes" ? (
           <section className="practice-tab-panel">
             <div className="section-heading">
@@ -263,6 +212,58 @@ export function PracticeScreen({
           </section>
         ) : null}
       </div>
+
+      <aside className="practice-recording-drawer" aria-label="Recording controls">
+        <span className="practice-recording-drawer__handle">Record</span>
+        <div className="practice-recording-drawer__panel">
+          <div>
+            <p className="eyebrow">Recording</p>
+            <h2>{activeSegment?.name ?? "No passage selected"}</h2>
+            <p className="muted">
+              {activeSegment ? `${segmentRecordings.length} take${segmentRecordings.length === 1 ? "" : "s"} for this passage` : "Choose a passage to record and review takes."}
+            </p>
+          </div>
+
+          <button
+            className={isRecording ? "danger-btn record-toggle-btn record-toggle-btn--active" : "primary-btn record-toggle-btn"}
+            data-tour-id="record-button"
+            onClick={onToggleRecording}
+            disabled={!activeSegment}
+          >
+            <span className="record-toggle-btn__dot" aria-hidden="true" />
+            {isRecording ? "Stop Recording" : "Record"}
+          </button>
+
+          {quickRecording ? (
+            <button className="secondary-btn" onClick={() => onPlayRecording(quickRecording.id)}>
+              Play latest take
+            </button>
+          ) : (
+            <div className="empty-state empty-state--compact">Record a take to enable playback here.</div>
+          )}
+
+          {segmentRecordings.length > 0 ? (
+            <ul className="segment-recording-list">
+              {segmentRecordings.map((recording) => (
+                <li key={recording.id} className="segment-recording-list__item">
+                  <span>
+                    {recording.name}
+                    {recording.id === activeRecordingId ? <span className="pill">Active</span> : null}
+                  </span>
+                  <div className="segment-recording-list__actions">
+                    <button className="secondary-btn" onClick={() => onPlayRecording(recording.id)}>
+                      Listen
+                    </button>
+                    <button className="link-btn" onClick={() => onDeleteRecording(recording.id)}>
+                      Remove
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      </aside>
 
       {transport ? <div className="practice-transport-dock">{transport}</div> : null}
     </div>

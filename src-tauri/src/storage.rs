@@ -1026,13 +1026,15 @@ pub fn delete_recording(project_root: &Path, recording_id: &str) -> Result<()> {
       |row| row.get(0),
     )
     .optional()?;
-  conn.execute("DELETE FROM recordings WHERE id = ?1", [recording_id])?;
   if let Some(relative_path) = relative_path {
     let absolute_path = project_root.join(relative_path);
-    if absolute_path.exists() {
-      fs::remove_file(&absolute_path).ok();
+    if let Err(error) = fs::remove_file(&absolute_path) {
+      if error.kind() != std::io::ErrorKind::NotFound {
+        return Err(error).with_context(|| format!("Failed to delete recording file at {}", absolute_path.display()));
+      }
     }
   }
+  conn.execute("DELETE FROM recordings WHERE id = ?1", [recording_id])?;
   Ok(())
 }
 

@@ -15,6 +15,7 @@ type Props = {
   segments: PracticeSegment[];
   selectedRecordingId: string | null;
   onSelectRecording: (recordingId: string) => void;
+  onListenRecording: (recordingId: string) => void;
   onSaveRecording: (recordingId: string, draft: RecordingDraft) => void;
   onDeleteRecording: (recordingId: string) => void;
   onDuplicateRecording: (recordingId: string) => void;
@@ -31,6 +32,7 @@ export function ReviewScreen({
   segments,
   selectedRecordingId,
   onSelectRecording,
+  onListenRecording,
   onSaveRecording,
   onDeleteRecording,
   onDuplicateRecording,
@@ -61,6 +63,7 @@ export function ReviewScreen({
           segments={segments}
           selectedRecordingId={selectedRecordingId}
           onSelectRecording={onSelectRecording}
+          onListenRecording={onListenRecording}
           onSaveRecording={onSaveRecording}
           onDeleteRecording={onDeleteRecording}
           onDuplicateRecording={onDuplicateRecording}
