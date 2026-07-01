@@ -9,14 +9,10 @@ import type {
   CreateProjectInput,
   DeleteProjectInput,
   ImportAssetInput,
-  PracticeActivity,
   PracticeSegment,
-  PracticeSession,
-  PracticeStats,
   ProjectDetail,
   ProjectSummary,
   RenameProjectInput,
-  ReorderPracticeSegmentsInput,
   SavePracticeSegmentInput,
   SaveRecordingInput,
   UpdateRecordingInput,
@@ -101,10 +97,6 @@ export async function deletePracticeSegment(projectId: string, segmentId: string
   return invokeProjectDetail("delete_practice_segment", { projectId, segmentId });
 }
 
-export async function reorderPracticeSegments(input: ReorderPracticeSegmentsInput): Promise<ProjectDetail> {
-  return invokeProjectDetail("reorder_practice_segments", { input });
-}
-
 export async function saveProjectNote(projectId: string, text: string): Promise<ProjectDetail> {
   return invokeProjectDetail("save_project_note", { projectId, text });
 }
@@ -150,10 +142,6 @@ export async function openAudioFile(): Promise<string | null> {
   }) as Promise<string | null>;
 }
 
-export async function openFolder(): Promise<string | null> {
-  return open({ directory: true, multiple: false }) as Promise<string | null>;
-}
-
 export async function openPathInFinder(path: string): Promise<void> {
   await openPath(path);
 }
@@ -178,11 +166,3 @@ export async function saveBinaryFile(path: string, data: ArrayBuffer): Promise<v
   const { writeBinaryFile } = await import("@tauri-apps/api/fs");
   await writeBinaryFile(path, new Uint8Array(data));
 }
-
-export type {
-  PracticeActivity,
-  PracticeSession,
-  PracticeStats,
-  ProjectDetail,
-  ProjectSummary,
-};
